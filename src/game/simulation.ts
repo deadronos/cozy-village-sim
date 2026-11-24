@@ -1,17 +1,22 @@
 import * as THREE from "three";
 import type { AssetLibrary } from "./assets.ts";
 import type { CozyAudio } from "./audio.ts";
+import { findGridPath, gridPathToWorldWaypoints, type PathOptions } from "./pathfinding.ts";
 import {
   BUILDING_DEFS,
   JOB_META,
   MAP_SIZE,
+  TRAIT_META,
   type BuildingInstance,
   type BuildingKind,
+  type EmoteBubble,
   type FloatingPopup,
   type GridTile,
   type ResourceBag,
+  type TimeOfDay,
   type VillagerInstance,
   type VillagerJob,
+  type VillagerTraitId,
 } from "./types.ts";
 import type { IslandWorld } from "./world.ts";
 
@@ -32,6 +37,23 @@ const VILLAGER_NAMES = [
   "Barnaby",
   "Poppy",
   "Cedric",
+  "Willow",
+  "Lark",
+  "Moss",
+  "Pippin",
+  "Thistle",
+  "Acorn",
+  "Rosie",
+  "Bram",
+];
+
+const ALL_TRAITS = Object.keys(TRAIT_META) as VillagerTraitId[];
+
+const CHAT_PAIRS: readonly [string, string][] = [
+  ["👋", "😊"],
+  ["💬", "😄"],
+  ["☕", "🎵"],
+  ["✨", "💛"],
 ];
 
 interface Particle {
@@ -54,6 +76,7 @@ export class VillageSimulation {
   public buildings: BuildingInstance[] = [];
   public villagers: VillagerInstance[] = [];
   public speedMultiplier = 1;
+  public timeOfDay: TimeOfDay = "morning";
   public selectedBuildingId: string | null = null;
   public selectedVillagerId: string | null = null;
 
@@ -67,10 +90,13 @@ export class VillageSimulation {
 
   private nextId = 1;
   private nameIndex = 0;
+  private navVersion = 1;
   private popups: FloatingPopup[] = [];
+  private emotes: EmoteBubble[] = [];
   private particles: Particle[] = [];
   private particleGeo = new THREE.BoxGeometry(0.12, 0.12, 0.12);
   private smokeTimer = 0;
+  private housingEmoteTimer = 0;
 
   constructor(
     scene: THREE.Scene,
@@ -132,12 +158,15 @@ export class VillageSimulation {
       if (!b.constructed) continue;
       score += BUILDING_DEFS[b.kind].coziness * b.level;
     }
-    // Bonus for painted meadows & paths
+    // Bonus for painted meadows & chatty villagers
     for (let gz = 0; gz < MAP_SIZE; gz++) {
       for (let gx = 0; gx < MAP_SIZE; gx++) {
         const t = this.world.getTile(gx, gz);
         if (t?.terrain === "meadow") score += 1;
       }
+    }
+    for (const v of this.villagers) {
+      if (v.trait === "chatty") score += 2;
     }
     return score;
   }
@@ -213,6 +242,7 @@ export class VillageSimulation {
 
     const finalRot = def.shoreOnly ? this.world.getWaterFacingRotation(gx, gz) : rotation;
     this.spawnBuilding(kind, gx, gz, finalRot, def.buildTime === 0);
+    this.navVersion++;
     this.audio.playPlace();
     this.onStateChanged?.();
     return true;
@@ -379,6 +409,7 @@ export class VillageSimulation {
       const def = BUILDING_DEFS[b.kind];
       this.resources.wood += Math.floor((def.cost.wood ?? 0) * 0.5);
       this.resources.stone += Math.floor((def.cost.stone ?? 0) * 0.5);
+      this.navVersion++;
       this.audio.playDemolish();
       this.onStateChanged?.();
       return true;
@@ -386,12 +417,14 @@ export class VillageSimulation {
 
     if (tile.prop) {
       this.world.setTileProp(gx, gz, null);
+      this.navVersion++;
       this.audio.playDemolish();
       return true;
     }
 
     if (tile.terrain === "path" || tile.terrain === "farm" || tile.terrain === "meadow") {
       this.world.setTileTerrain(gx, gz, "grass");
+      this.navVersion++;
       this.audio.playDemolish();
       this.onStateChanged?.();
       return true;
@@ -411,6 +444,7 @@ export class VillageSimulation {
         this.world.setTileTerrain(gx, gz, "grass");
       }
       this.world.setTileProp(gx, gz, Math.random() < 0.5 ? "tree_pine" : "tree_oak");
+      this.navVersion++;
       this.audio.playPaint();
       return true;
     }
@@ -420,9 +454,48 @@ export class VillageSimulation {
       this.world.setTileProp(gx, gz, null);
     }
     this.world.setTileTerrain(gx, gz, paint);
+    this.navVersion++;
     this.audio.playPaint();
     this.onStateChanged?.();
     return true;
+  }
+
+  private pickVillagerName(): string {
+    const activeNames = new Set(this.villagers.map((v) => v.name));
+    for (let i = 0; i < VILLAGER_NAMES.length; i++) {
+      const candidate = VILLAGER_NAMES[(this.nameIndex + i) % VILLAGER_NAMES.length]!;
+      if (!activeNames.has(candidate)) {
+        this.nameIndex = (this.nameIndex + i + 1) % VILLAGER_NAMES.length;
+        return candidate;
+      }
+    }
+    const fallback = VILLAGER_NAMES[this.nameIndex % VILLAGER_NAMES.length]!;
+    this.nameIndex++;
+    return fallback;
+  }
+
+  private pickVillagerTrait(job: VillagerJob): VillagerTraitId {
+    const jobSynergy = ALL_TRAITS.filter((t) => {
+      const preferred = TRAIT_META[t].preferredJobs;
+      return !preferred || preferred.includes(job);
+    });
+    const pool = Math.random() < 0.72 && jobSynergy.length > 0 ? jobSynergy : ALL_TRAITS;
+    return pool[Math.floor(Math.random() * pool.length)]!;
+  }
+
+  private getVillagerWorkSpeed(v: VillagerInstance): number {
+    let mult = 1.0;
+    if (v.trait === "early_bird") {
+      if (this.timeOfDay === "morning") mult *= 1.25;
+      else if (this.timeOfDay === "golden") mult *= 1.1;
+    } else if (v.trait === "keen_builder" && v.job === "builder") {
+      mult *= 1.3;
+    } else if (v.trait === "lumber_pro" && v.job === "lumberjack") {
+      mult *= 1.15;
+    } else if (v.trait === "master_smith" && v.job === "smith") {
+      mult *= 1.25;
+    }
+    return mult;
   }
 
   private tryAssignWorker(b: BuildingInstance): void {
@@ -431,24 +504,30 @@ export class VillageSimulation {
     if (this.villagers.length >= this.getMaxPopulation()) return;
 
     const id = `v_${this.nextId++}`;
-    const name = VILLAGER_NAMES[this.nameIndex % VILLAGER_NAMES.length]!;
-    this.nameIndex++;
+    const name = this.pickVillagerName();
+    const trait = this.pickVillagerTrait(def.job);
+    const traitMeta = TRAIT_META[trait];
 
     const { group, toolMesh } = this.assets.createVillagerMesh(def.job);
-    const homePos = this.world.gridToWorld(b.gx, b.gz);
-    group.position.set(homePos.x + 0.5, 0, homePos.z + 0.7);
+    const spawnTile = this.findWalkableAdjacentTile(b.gx, b.gz) ?? { gx: b.gx, gz: b.gz };
+    const spawnPos = this.world.gridToWorld(spawnTile.gx, spawnTile.gz);
+    const tileElev = this.world.getTile(spawnTile.gx, spawnTile.gz)?.elevation ?? 0;
+    group.position.set(spawnPos.x, tileElev, spawnPos.z);
     group.userData = { villagerId: id };
     this.scene.add(group);
 
     const villager: VillagerInstance = {
       id,
       name,
+      trait,
       job: def.job,
       homeBuildingId: b.id,
-      x: homePos.x + 0.5,
-      z: homePos.z + 0.7,
-      targetX: homePos.x + 0.5,
-      targetZ: homePos.z + 0.7,
+      x: spawnPos.x,
+      z: spawnPos.z,
+      targetX: spawnPos.x,
+      targetZ: spawnPos.z,
+      path: [],
+      pathNavVersion: this.navVersion,
       state: "idle",
       statusText: `Ready as ${JOB_META[def.job].label}`,
       workTimer: 0,
@@ -459,17 +538,122 @@ export class VillageSimulation {
       mesh: group,
       toolMesh,
       walkPhase: Math.random() * 6.28,
+      chatCooldown: 4 + Math.random() * 6,
+      waitEmoteTimer: 3 + Math.random() * 4,
     };
 
     b.workerId = id;
     this.villagers.push(villager);
+    const homePos = this.world.gridToWorld(b.gx, b.gz);
     this.spawnPopup(
       homePos.x,
       1.6,
       homePos.z,
-      `${JOB_META[def.job].icon} ${name} joined!`,
+      `${JOB_META[def.job].icon} ${name} (${traitMeta.icon} ${traitMeta.label}) joined!`,
       "#b8f2ff",
     );
+    this.spawnEmote({
+      villagerId: id,
+      x: spawnPos.x,
+      y: tileElev + 1.35,
+      z: spawnPos.z,
+      icon: "👋",
+      duration: 2.2,
+    });
+  }
+
+  private findWalkableAdjacentTile(gx: number, gz: number): { gx: number; gz: number } | null {
+    const dirs: readonly [number, number][] = [
+      [0, 1],
+      [1, 0],
+      [0, -1],
+      [-1, 0],
+      [1, 1],
+      [-1, 1],
+      [1, -1],
+      [-1, -1],
+    ];
+    let fallback: { gx: number; gz: number } | null = null;
+    for (const [dx, dz] of dirs) {
+      const t = this.world.getTile(gx + dx, gz + dz);
+      if (!t || t.terrain === "water" || t.buildingId !== null) continue;
+      if (t.terrain === "path") return { gx: t.gx, gz: t.gz };
+      if (!fallback) fallback = { gx: t.gx, gz: t.gz };
+    }
+    return fallback;
+  }
+
+  private setVillagerDestination(
+    v: VillagerInstance,
+    goalGx: number,
+    goalGz: number,
+    options: PathOptions = {},
+    finalOffset?: { x: number; z: number },
+  ): boolean {
+    const startGrid = this.world.worldToGrid(v.x, v.z);
+    const goalPos = this.world.gridToWorld(goalGx, goalGz);
+
+    if (startGrid) {
+      const gridPath = findGridPath(
+        this.world,
+        startGrid.gx,
+        startGrid.gz,
+        goalGx,
+        goalGz,
+        options,
+      );
+      if (gridPath !== null) {
+        const waypoints = gridPathToWorldWaypoints(this.world, gridPath, finalOffset);
+        v.path = waypoints;
+        v.pathNavVersion = this.navVersion;
+        const last = waypoints[waypoints.length - 1];
+        v.targetX = last ? last.x : v.x;
+        v.targetZ = last ? last.z : v.z;
+        return true;
+      }
+    }
+
+    // Fallback: direct waypoint if completely walled off so villagers never freeze
+    v.path = [{ x: goalPos.x + (finalOffset?.x ?? 0), z: goalPos.z + (finalOffset?.z ?? 0) }];
+    v.pathNavVersion = this.navVersion;
+    v.targetX = v.path[0]!.x;
+    v.targetZ = v.path[0]!.z;
+    return false;
+  }
+
+  private rerouteVillager(v: VillagerInstance, home: BuildingInstance): void {
+    v.pathNavVersion = this.navVersion;
+    if (v.state === "returning") {
+      this.setVillagerDestination(v, home.gx, home.gz, {
+        goalAdjacent: home.kind !== "fishing_dock",
+        allowGoalBuilding: home.kind === "fishing_dock",
+      });
+      return;
+    }
+    if (v.state === "moving") {
+      if (v.targetBuildingId) {
+        const site = this.buildings.find((b) => b.id === v.targetBuildingId);
+        if (site) {
+          this.setVillagerDestination(v, site.gx, site.gz, { goalAdjacent: true });
+          return;
+        }
+      }
+      if (v.targetTile) {
+        const tile = this.world.getTile(v.targetTile.gx, v.targetTile.gz);
+        const isPropTarget =
+          tile?.prop === "tree_pine" || tile?.prop === "tree_oak" || tile?.prop === "rock";
+        this.setVillagerDestination(v, v.targetTile.gx, v.targetTile.gz, {
+          goalAdjacent: isPropTarget,
+        });
+        return;
+      }
+      const targetGrid = this.world.worldToGrid(v.targetX, v.targetZ);
+      if (targetGrid) {
+        this.setVillagerDestination(v, targetGrid.gx, targetGrid.gz, {
+          allowGoalBuilding: v.job === "fisherman",
+        });
+      }
+    }
   }
 
   public update(dt: number, elapsed: number, camera: THREE.Camera): void {
@@ -534,11 +718,76 @@ export class VillageSimulation {
       for (const v of this.villagers) {
         this.updateVillager(v, simDt, elapsed);
       }
+
+      // Cozy villager-to-villager chats & housing-needed emote bubbles
+      this.updateVillagerChats(simDt);
+      this.updateHousingWaitEmotes(simDt);
     }
 
-    // Update particles & floating popups
+    // Update particles, floating popups & cozy emote bubbles
     this.updateParticles(dt);
     this.updatePopups(dt, camera);
+    this.updateEmotes(dt, camera);
+  }
+
+  private updateVillagerChats(dt: number): void {
+    for (const v of this.villagers) {
+      if (v.chatCooldown > 0) v.chatCooldown -= dt;
+    }
+
+    for (let i = 0; i < this.villagers.length; i++) {
+      const a = this.villagers[i]!;
+      if (a.chatCooldown > 0) continue;
+      for (let j = i + 1; j < this.villagers.length; j++) {
+        const b = this.villagers[j]!;
+        if (b.chatCooldown > 0) continue;
+        const dist = Math.hypot(a.x - b.x, a.z - b.z);
+        if (dist < 2.2) {
+          const pair = CHAT_PAIRS[Math.floor(Math.random() * CHAT_PAIRS.length)]!;
+          this.spawnEmote({
+            villagerId: a.id,
+            x: a.x,
+            y: a.mesh.position.y + 1.35,
+            z: a.z,
+            icon: pair[0],
+            duration: 2.3,
+          });
+          this.spawnEmote({
+            villagerId: b.id,
+            x: b.x,
+            y: b.mesh.position.y + 1.35,
+            z: b.z,
+            icon: pair[1],
+            duration: 2.6,
+          });
+          a.chatCooldown = a.trait === "chatty" ? 8 + Math.random() * 5 : 15 + Math.random() * 9;
+          b.chatCooldown = b.trait === "chatty" ? 8 + Math.random() * 5 : 15 + Math.random() * 9;
+          break;
+        }
+      }
+    }
+  }
+
+  private updateHousingWaitEmotes(dt: number): void {
+    this.housingEmoteTimer -= dt;
+    if (this.housingEmoteTimer > 0) return;
+    this.housingEmoteTimer = 8.5;
+
+    if (this.villagers.length < this.getMaxPopulation()) return;
+    for (const b of this.buildings) {
+      if (!b.constructed || b.workerId) continue;
+      const def = BUILDING_DEFS[b.kind];
+      if (!def.job) continue;
+      this.spawnEmote({
+        buildingId: b.id,
+        x: b.mesh.position.x,
+        y: b.mesh.position.y + 2.05,
+        z: b.mesh.position.z,
+        icon: "🏡?",
+        variant: "wait",
+        duration: 3.2,
+      });
+    }
   }
 
   private updateVillager(v: VillagerInstance, dt: number, elapsed: number): void {
@@ -546,30 +795,49 @@ export class VillageSimulation {
     if (!home) return;
 
     const toolBoost = this.getToolSpeedBonus();
+    const workTraitBoost = this.getVillagerWorkSpeed(v);
     const homeLevel = home.level;
 
     if (v.state === "idle") {
-      this.pickTaskForVillager(v, home);
+      this.pickTaskForVillager(v, home, dt);
       return;
     }
 
     if (v.state === "moving" || v.state === "returning") {
-      const dx = v.targetX - v.x;
-      const dz = v.targetZ - v.z;
-      const dist = Math.hypot(dx, dz);
+      // Recompute A* path if roads or buildings changed while walking
+      if (v.pathNavVersion !== this.navVersion) {
+        this.rerouteVillager(v, home);
+      }
 
-      // Faster walking on cobblestone paths!
+      // Faster walking on cobblestone paths & for Fast Walker trait!
       const currGrid = this.world.worldToGrid(v.x, v.z);
       const currTile = currGrid ? this.world.getTile(currGrid.gx, currGrid.gz) : null;
+      const baseElevation = currTile?.elevation ?? 0;
       const pathBoost = currTile?.terrain === "path" ? 1.45 : 1.0;
-      const speed = 2.4 * pathBoost * (0.9 + toolBoost * 0.1);
+      const traitWalkBoost = v.trait === "fast_walker" ? 1.25 : 1.0;
+      const speed = 2.4 * pathBoost * traitWalkBoost * (0.9 + toolBoost * 0.1);
 
-      if (dist < 0.16) {
-        v.x = v.targetX;
-        v.z = v.targetZ;
+      const nextWp = v.path[0];
+      const goalX = nextWp ? nextWp.x : v.targetX;
+      const goalZ = nextWp ? nextWp.z : v.targetZ;
+      const dx = goalX - v.x;
+      const dz = goalZ - v.z;
+      const dist = Math.hypot(dx, dz);
+
+      if (dist < 0.18) {
+        v.x = goalX;
+        v.z = goalZ;
+        if (v.path.length > 0) {
+          v.path.shift();
+        }
+        if (v.path.length > 0) {
+          return;
+        }
+
+        // Reached final destination
         if (v.state === "moving") {
           v.state = "working";
-          v.workTimer = this.getWorkDuration(v.job) / toolBoost;
+          v.workTimer = this.getWorkDuration(v.job) / (toolBoost * workTraitBoost);
         } else {
           // Arrived home -> deposit carried resources
           if (v.carrying && v.carryingAmount > 0) {
@@ -586,11 +854,19 @@ export class VillageSimulation {
                     : "⚒️";
             this.spawnPopup(
               v.x,
-              1.3,
+              baseElevation + 1.3,
               v.z,
               `+${v.carryingAmount} ${icon}`,
               v.carrying === "tools" ? "#ffd166" : "#b8f5a8",
             );
+            this.spawnEmote({
+              villagerId: v.id,
+              x: v.x,
+              y: baseElevation + 1.45,
+              z: v.z,
+              icon: v.carrying === "tools" ? "⚒️" : "✨",
+              duration: 1.8,
+            });
             this.audio.playHarvest();
             v.carrying = null;
             v.carryingAmount = 0;
@@ -599,18 +875,23 @@ export class VillageSimulation {
           v.state = "idle";
         }
       } else {
-        v.x += (dx / dist) * speed * dt;
-        v.z += (dz / dist) * speed * dt;
-        v.walkPhase += dt * 11 * pathBoost;
+        const step = Math.min(dist, speed * dt);
+        v.x += (dx / dist) * step;
+        v.z += (dz / dist) * step;
+        v.walkPhase += dt * 11 * pathBoost * traitWalkBoost;
         v.mesh.rotation.y = Math.atan2(dx, dz);
-        v.mesh.position.set(v.x, Math.abs(Math.sin(v.walkPhase)) * 0.09, v.z);
+        v.mesh.position.set(v.x, baseElevation + Math.abs(Math.sin(v.walkPhase)) * 0.09, v.z);
       }
       return;
     }
 
     if (v.state === "working") {
       // Cute tool-swing animation while working
-      v.mesh.position.set(v.x, Math.abs(Math.sin(elapsed * 8)) * 0.05, v.z);
+      const currGrid = this.world.worldToGrid(v.x, v.z);
+      const baseElevation = currGrid
+        ? (this.world.getTile(currGrid.gx, currGrid.gz)?.elevation ?? 0)
+        : 0;
+      v.mesh.position.set(v.x, baseElevation + Math.abs(Math.sin(elapsed * 8)) * 0.05, v.z);
       if (v.toolMesh) {
         v.toolMesh.rotation.x = Math.sin(elapsed * 12) * 0.65;
       }
@@ -624,13 +905,22 @@ export class VillageSimulation {
         }
         const def = BUILDING_DEFS[site.kind];
         site.buildProgress +=
-          (dt * toolBoost * (1 + (homeLevel - 1) * 0.35)) / Math.max(def.buildTime, 1);
+          (dt * toolBoost * workTraitBoost * (1 + (homeLevel - 1) * 0.35)) /
+          Math.max(def.buildTime, 1);
         v.statusText = `Building ${def.name} (${Math.min(99, Math.floor(site.buildProgress * 100))}%)`;
         if (Math.random() < dt * 4) {
           this.spawnParticles(site.mesh.position.x, 0.7, site.mesh.position.z, 0xdcb47a, 2);
         }
         if (site.buildProgress >= 1) {
           this.completeBuilding(site);
+          this.spawnEmote({
+            villagerId: v.id,
+            x: v.x,
+            y: baseElevation + 1.45,
+            z: v.z,
+            icon: "🎉",
+            duration: 2.4,
+          });
           v.targetBuildingId = null;
           v.state = "idle";
         }
@@ -663,25 +953,23 @@ export class VillageSimulation {
     }
   }
 
-  private pickTaskForVillager(v: VillagerInstance, home: BuildingInstance): void {
-    const homePos = this.world.gridToWorld(home.gx, home.gz);
-
+  private pickTaskForVillager(v: VillagerInstance, home: BuildingInstance, dt: number): void {
     if (v.job === "builder") {
       // Find nearest unconstructed building
       const site = this.buildings.find((b) => !b.constructed);
       if (site) {
-        const pos = this.world.gridToWorld(site.gx, site.gz);
         v.targetBuildingId = site.id;
-        v.targetX = pos.x + 0.75;
-        v.targetZ = pos.z + 0.75;
+        v.targetTile = null;
+        this.setVillagerDestination(v, site.gx, site.gz, { goalAdjacent: true });
         v.state = "moving";
         v.statusText = `Heading to build ${BUILDING_DEFS[site.kind].name}`;
       } else {
-        // Cozy patrol near Town Hall / Builder Yard
-        v.targetX = homePos.x + (Math.random() - 0.5) * 3.0;
-        v.targetZ = homePos.z + (Math.random() - 0.5) * 3.0;
-        v.state = "moving";
+        // Cozy patrol on nearby walkable tiles (preferring paths)
+        const patrolTile = this.pickPatrolTile(home.gx, home.gz);
         v.targetBuildingId = null;
+        v.targetTile = patrolTile;
+        this.setVillagerDestination(v, patrolTile.gx, patrolTile.gz);
+        v.state = "moving";
         v.workTimer = 1.5;
         v.statusText = "Inspecting village structures";
       }
@@ -695,14 +983,14 @@ export class VillageSimulation {
         (t) => t.prop === "tree_pine" || t.prop === "tree_oak",
       );
       if (treeTile) {
-        const pos = this.world.gridToWorld(treeTile.gx, treeTile.gz);
         v.targetTile = { gx: treeTile.gx, gz: treeTile.gz };
-        v.targetX = pos.x + 0.5;
-        v.targetZ = pos.z + 0.5;
+        v.targetBuildingId = null;
+        this.setVillagerDestination(v, treeTile.gx, treeTile.gz, { goalAdjacent: true });
         v.state = "moving";
         v.statusText = "Walking to chop timber";
       } else {
         v.statusText = "Waiting for trees (paint Trees!)";
+        this.tickWaitEmote(v, dt, "🌲?");
       }
       return;
     }
@@ -716,23 +1004,30 @@ export class VillageSimulation {
           (t) => t.terrain === "farm" && t.cropStage >= 0.85,
         ) ?? this.findNearestTile(home.gx, home.gz, (t) => t.terrain === "farm");
       if (farmTile) {
-        const pos = this.world.gridToWorld(farmTile.gx, farmTile.gz);
         v.targetTile = { gx: farmTile.gx, gz: farmTile.gz };
-        v.targetX = pos.x;
-        v.targetZ = pos.z;
+        v.targetBuildingId = null;
+        this.setVillagerDestination(v, farmTile.gx, farmTile.gz);
         v.state = "moving";
         v.statusText =
           farmTile.cropStage >= 0.85 ? "Heading to harvest wheat" : "Tending farmfields";
       } else {
         v.statusText = "Needs painted Farmfields nearby!";
+        this.tickWaitEmote(v, dt, "🌾?");
       }
       return;
     }
 
     if (v.job === "fisherman") {
       // Walk onto the fishing dock pier
-      v.targetX = homePos.x + 0.25;
-      v.targetZ = homePos.z + 0.25;
+      v.targetTile = null;
+      v.targetBuildingId = null;
+      this.setVillagerDestination(
+        v,
+        home.gx,
+        home.gz,
+        { allowGoalBuilding: true },
+        { x: 0.25, z: 0.25 },
+      );
       v.state = "moving";
       v.statusText = "Casting line off the dock";
       return;
@@ -741,24 +1036,55 @@ export class VillageSimulation {
     if (v.job === "smith") {
       const rockTile = this.findNearestTile(home.gx, home.gz, (t) => t.prop === "rock");
       if (rockTile && Math.random() < 0.45) {
-        const pos = this.world.gridToWorld(rockTile.gx, rockTile.gz);
         v.targetTile = { gx: rockTile.gx, gz: rockTile.gz };
-        v.targetX = pos.x + 0.5;
-        v.targetZ = pos.z + 0.5;
+        v.targetBuildingId = null;
+        this.setVillagerDestination(v, rockTile.gx, rockTile.gz, { goalAdjacent: true });
         v.state = "moving";
         v.statusText = "Mining stone & iron ore";
       } else {
         v.targetTile = null;
-        v.targetX = homePos.x + 0.55;
-        v.targetZ = homePos.z + 0.55;
+        v.targetBuildingId = null;
+        this.setVillagerDestination(v, home.gx, home.gz, { goalAdjacent: true });
         v.state = "moving";
         v.statusText = "Forging tools at the anvil";
       }
     }
   }
 
+  private pickPatrolTile(homeGx: number, homeGz: number): { gx: number; gz: number } {
+    const candidates: { gx: number; gz: number; isPath: boolean }[] = [];
+    for (let dz = -3; dz <= 3; dz++) {
+      for (let dx = -3; dx <= 3; dx++) {
+        if (dx === 0 && dz === 0) continue;
+        const t = this.world.getTile(homeGx + dx, homeGz + dz);
+        if (!t || t.terrain === "water" || t.buildingId !== null) continue;
+        candidates.push({ gx: t.gx, gz: t.gz, isPath: t.terrain === "path" });
+      }
+    }
+    const paths = candidates.filter((c) => c.isPath);
+    const pool = paths.length > 0 && Math.random() < 0.7 ? paths : candidates;
+    if (pool.length === 0) return { gx: homeGx, gz: homeGz };
+    const chosen = pool[Math.floor(Math.random() * pool.length)]!;
+    return { gx: chosen.gx, gz: chosen.gz };
+  }
+
+  private tickWaitEmote(v: VillagerInstance, dt: number, icon: string): void {
+    v.waitEmoteTimer -= dt;
+    if (v.waitEmoteTimer <= 0) {
+      v.waitEmoteTimer = 9 + Math.random() * 4;
+      this.spawnEmote({
+        villagerId: v.id,
+        x: v.x,
+        y: v.mesh.position.y + 1.35,
+        z: v.z,
+        icon,
+        variant: "wait",
+        duration: 3.0,
+      });
+    }
+  }
+
   private finishWorkAction(v: VillagerInstance, home: BuildingInstance): void {
-    const homePos = this.world.gridToWorld(home.gx, home.gz);
     const bonus = home.level;
 
     if (v.job === "lumberjack" && v.targetTile) {
@@ -766,12 +1092,12 @@ export class VillageSimulation {
       if (tile && (tile.prop === "tree_pine" || tile.prop === "tree_oak")) {
         this.world.setTileProp(tile.gx, tile.gz, "stump");
         tile.regrowTimer = 0;
+        this.navVersion++;
         this.spawnParticles(v.x, 0.7, v.z, 0x8f6138, 6);
         v.carrying = "wood";
-        v.carryingAmount = 2 + bonus;
+        v.carryingAmount = 2 + bonus + (v.trait === "lumber_pro" ? 1 : 0);
       }
-      v.targetX = homePos.x + 0.4;
-      v.targetZ = homePos.z + 0.5;
+      this.setVillagerDestination(v, home.gx, home.gz, { goalAdjacent: true });
       v.state = "returning";
       v.statusText = "Carrying timber home";
       return;
@@ -789,17 +1115,17 @@ export class VillageSimulation {
               b.constructed &&
               Math.hypot(b.gx - tile.gx, b.gz - tile.gz) <= 5.5,
           );
+          const greenThumbBonus = v.trait === "green_thumb" ? 1 : 0;
           v.carrying = "food";
-          v.carryingAmount = (2 + bonus) * (hasWindmill ? 2 : 1);
+          v.carryingAmount = (2 + bonus + greenThumbBonus) * (hasWindmill ? 2 : 1);
           this.spawnParticles(v.x, 0.5, v.z, 0xf2cf52, 6);
-          v.targetX = homePos.x + 0.4;
-          v.targetZ = homePos.z + 0.5;
+          this.setVillagerDestination(v, home.gx, home.gz, { goalAdjacent: true });
           v.state = "returning";
           v.statusText = "Delivering golden wheat";
           return;
         }
-        // Tending speeds up growth!
-        tile.cropStage = Math.min(1, tile.cropStage + 0.45);
+        // Tending speeds up growth (Green Thumb nurtures even faster!)
+        tile.cropStage = Math.min(1, tile.cropStage + (v.trait === "green_thumb" ? 0.7 : 0.45));
         this.world.updateCropVisual(tile);
       }
       v.state = "idle";
@@ -808,28 +1134,39 @@ export class VillageSimulation {
 
     if (v.job === "fisherman") {
       v.carrying = "food";
-      v.carryingAmount = 2 + bonus;
+      v.carryingAmount = 2 + bonus + (v.trait === "lucky_angler" ? 1 : 0);
+      if (v.trait === "lucky_angler" && Math.random() < 0.3) {
+        const luckyWood = Math.random() < 0.5;
+        if (luckyWood) this.resources.wood += 1;
+        else this.resources.stone += 1;
+        this.spawnPopup(v.x, 1.5, v.z, luckyWood ? "🍀 +1 🪵" : "🍀 +1 🪨", "#a8f0c6");
+      }
       this.spawnParticles(v.x, 0.4, v.z, 0x7fd4ff, 6);
-      v.targetX = homePos.x - 0.3;
-      v.targetZ = homePos.z - 0.3;
+      this.setVillagerDestination(
+        v,
+        home.gx,
+        home.gz,
+        { allowGoalBuilding: true },
+        { x: -0.25, z: -0.25 },
+      );
       v.state = "returning";
       v.statusText = "Reeling in fresh fish";
       return;
     }
 
     if (v.job === "smith") {
+      const isMaster = v.trait === "master_smith";
       if (v.targetTile) {
         v.carrying = "stone";
-        v.carryingAmount = 2 + bonus;
+        v.carryingAmount = 2 + bonus + (isMaster && Math.random() < 0.35 ? 1 : 0);
         v.statusText = "Hauling ore to the Smithy";
       } else {
         v.carrying = "tools";
-        v.carryingAmount = 1;
+        v.carryingAmount = 1 + (isMaster && Math.random() < 0.35 ? 1 : 0);
         this.resources.stone += 1;
         v.statusText = "Finished forging cozy tools!";
       }
-      v.targetX = homePos.x + 0.3;
-      v.targetZ = homePos.z + 0.3;
+      this.setVillagerDestination(v, home.gx, home.gz, { goalAdjacent: true });
       v.state = "returning";
       return;
     }
@@ -933,6 +1270,93 @@ export class VillageSimulation {
       const sy = (-v.y * 0.5 + 0.5) * window.innerHeight;
       p.el.style.transform = `translate(${sx}px, ${sy}px) translate(-50%, -50%)`;
       p.el.style.opacity = `${Math.max(0, 1 - p.life / p.maxLife)}`;
+    }
+  }
+
+  public spawnEmote(opts: {
+    villagerId?: string;
+    buildingId?: string;
+    x: number;
+    y: number;
+    z: number;
+    icon: string;
+    variant?: "normal" | "wait";
+    duration?: number;
+  }): void {
+    // Avoid overlapping emotes on the same villager or building
+    for (let i = this.emotes.length - 1; i >= 0; i--) {
+      const existing = this.emotes[i]!;
+      const sameOwner =
+        (opts.villagerId && existing.villagerId === opts.villagerId) ||
+        (opts.buildingId && existing.buildingId === opts.buildingId);
+      if (sameOwner) {
+        existing.el.remove();
+        this.emotes.splice(i, 1);
+      }
+    }
+
+    const el = document.createElement("div");
+    el.className = opts.variant === "wait" ? "emote-bubble emote-bubble--wait" : "emote-bubble";
+    el.textContent = opts.icon;
+    this.floatingLayer.appendChild(el);
+
+    this.emotes.push({
+      villagerId: opts.villagerId,
+      buildingId: opts.buildingId,
+      x: opts.x,
+      y: opts.y,
+      z: opts.z,
+      icon: opts.icon,
+      life: 0,
+      maxLife: opts.duration ?? 2.2,
+      el,
+    });
+  }
+
+  private updateEmotes(dt: number, camera: THREE.Camera): void {
+    const v = new THREE.Vector3();
+    for (let i = this.emotes.length - 1; i >= 0; i--) {
+      const e = this.emotes[i]!;
+      e.life += dt;
+      if (e.life >= e.maxLife) {
+        e.el.remove();
+        this.emotes.splice(i, 1);
+        continue;
+      }
+
+      if (e.villagerId) {
+        const owner = this.villagers.find((x) => x.id === e.villagerId);
+        if (!owner) {
+          e.el.remove();
+          this.emotes.splice(i, 1);
+          continue;
+        }
+        e.x = owner.x;
+        e.y = owner.mesh.position.y + 1.4;
+        e.z = owner.z;
+      } else if (e.buildingId) {
+        const b = this.buildings.find((x) => x.id === e.buildingId);
+        if (!b || b.workerId) {
+          e.el.remove();
+          this.emotes.splice(i, 1);
+          continue;
+        }
+      }
+
+      const bob = Math.sin(e.life * 4.5) * 0.06;
+      v.set(e.x, e.y + bob, e.z).project(camera);
+      if (v.z > 1) {
+        e.el.style.opacity = "0";
+        continue;
+      }
+
+      const sx = (v.x * 0.5 + 0.5) * window.innerWidth;
+      const sy = (-v.y * 0.5 + 0.5) * window.innerHeight;
+      const popIn = Math.min(1, e.life / 0.16);
+      const scale = 0.75 + popIn * 0.25;
+      const fadeOut = Math.min(1, (e.maxLife - e.life) / 0.4);
+      e.el.style.transform = `translate(${sx}px, ${sy}px) translate(-50%, -100%) scale(${scale.toFixed(2)})`;
+      e.el.style.opacity = `${Math.max(0, Math.min(popIn, fadeOut))}`;
     }
   }
 }

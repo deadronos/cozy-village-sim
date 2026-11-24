@@ -17,6 +17,24 @@ export type BuildingKind =
 
 export type VillagerJob = "builder" | "lumberjack" | "farmer" | "fisherman" | "smith";
 
+export type VillagerTraitId =
+  | "early_bird"
+  | "fast_walker"
+  | "green_thumb"
+  | "master_smith"
+  | "keen_builder"
+  | "lumber_pro"
+  | "chatty"
+  | "lucky_angler";
+
+export interface VillagerTraitDefinition {
+  id: VillagerTraitId;
+  label: string;
+  icon: string;
+  description: string;
+  preferredJobs?: VillagerJob[];
+}
+
 export type ToolMode =
   | { category: "select" }
   | { category: "build"; building: BuildingKind }
@@ -77,12 +95,15 @@ export interface BuildingInstance {
 export interface VillagerInstance {
   id: string;
   name: string;
+  trait: VillagerTraitId;
   job: VillagerJob;
   homeBuildingId: string;
   x: number;
   z: number;
   targetX: number;
   targetZ: number;
+  path: Array<{ x: number; z: number }>;
+  pathNavVersion: number;
   state: "idle" | "moving" | "working" | "returning";
   statusText: string;
   workTimer: number;
@@ -93,6 +114,20 @@ export interface VillagerInstance {
   mesh: THREE.Group;
   toolMesh: THREE.Object3D | null;
   walkPhase: number;
+  chatCooldown: number;
+  waitEmoteTimer: number;
+}
+
+export interface EmoteBubble {
+  villagerId?: string;
+  buildingId?: string;
+  x: number;
+  y: number;
+  z: number;
+  icon: string;
+  life: number;
+  maxLife: number;
+  el: HTMLDivElement;
 }
 
 export interface FloatingPopup {
@@ -212,4 +247,60 @@ export const JOB_META: Record<
   farmer: { label: "Farmer", icon: "🌾", tunicColor: 0x4f8a4b, hatColor: 0xe6c35c },
   fisherman: { label: "Fisherman", icon: "🎣", tunicColor: 0x3b7aa8, hatColor: 0x264e70 },
   smith: { label: "Smith", icon: "⚒️", tunicColor: 0x454955, hatColor: 0x2b2d34 },
+};
+
+export const TRAIT_META: Record<VillagerTraitId, VillagerTraitDefinition> = {
+  early_bird: {
+    id: "early_bird",
+    label: "Early Bird",
+    icon: "🌅",
+    description: "Works 25% faster in the Morning and +10% at Golden Hour.",
+  },
+  fast_walker: {
+    id: "fast_walker",
+    label: "Fast Walker",
+    icon: "👟",
+    description: "Walks 25% faster across the village (stacks with Cobble Paths).",
+  },
+  green_thumb: {
+    id: "green_thumb",
+    label: "Green Thumb",
+    icon: "🌱",
+    description: "Harvests +1 bonus Food and nurtures wheat fields faster.",
+    preferredJobs: ["farmer"],
+  },
+  master_smith: {
+    id: "master_smith",
+    label: "Master Smith",
+    icon: "🔥",
+    description: "Forges & mines 25% faster with a chance for bonus Tools or Stone.",
+    preferredJobs: ["smith"],
+  },
+  keen_builder: {
+    id: "keen_builder",
+    label: "Keen Builder",
+    icon: "📐",
+    description: "Constructs new village buildings 30% faster.",
+    preferredJobs: ["builder"],
+  },
+  lumber_pro: {
+    id: "lumber_pro",
+    label: "Hearty Woodsman",
+    icon: "🪵",
+    description: "Chops 15% faster and brings home +1 bonus Wood per tree.",
+    preferredJobs: ["lumberjack"],
+  },
+  chatty: {
+    id: "chatty",
+    label: "Chatterbox",
+    icon: "💬",
+    description: "Loves greeting neighbors on the road (+2 Village Coziness).",
+  },
+  lucky_angler: {
+    id: "lucky_angler",
+    label: "Lucky Angler",
+    icon: "🍀",
+    description: "Reels in +1 bonus Fish and occasionally hooks driftwood or stone.",
+    preferredJobs: ["fisherman"],
+  },
 };
