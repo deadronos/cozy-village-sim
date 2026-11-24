@@ -1,10 +1,17 @@
+import { normalizeSeed } from "./islandGen.ts";
 import {
+  ARCHETYPE_META,
+  BIOME_META,
   BUILDING_DEFS,
+  DEFAULT_ISLAND_CONFIG,
   JOB_META,
   MAP_SIZE,
   SEASON_META,
   TRAIT_META,
   type BuildingKind,
+  type IslandArchetype,
+  type IslandBiome,
+  type IslandConfig,
   type ResourceBag,
   type ResourcePropType,
   type Season,
@@ -50,6 +57,9 @@ export interface SavedVillager {
 export interface VillageSaveData {
   schemaVersion: typeof SAVE_SCHEMA_VERSION;
   savedAt: string;
+  seed?: string;
+  archetype?: IslandArchetype;
+  biome?: IslandBiome;
   timeOfDay: TimeOfDay;
   season: Season;
   autoSeason: boolean;
@@ -62,6 +72,9 @@ export interface VillageSaveData {
 
 export interface SaveSummary {
   savedAt: string;
+  seed: string;
+  archetype: IslandArchetype;
+  biome: IslandBiome;
   buildingCount: number;
   villagerCount: number;
   season: Season;
@@ -82,6 +95,8 @@ const VALID_SEASONS = new Set<Season>(Object.keys(SEASON_META) as Season[]);
 const VALID_BUILDINGS = new Set<BuildingKind>(Object.keys(BUILDING_DEFS) as BuildingKind[]);
 const VALID_JOBS = new Set<VillagerJob>(Object.keys(JOB_META) as VillagerJob[]);
 const VALID_TRAITS = new Set<VillagerTraitId>(Object.keys(TRAIT_META) as VillagerTraitId[]);
+const VALID_ARCHETYPES = new Set<IslandArchetype>(Object.keys(ARCHETYPE_META) as IslandArchetype[]);
+const VALID_BIOMES = new Set<IslandBiome>(Object.keys(BIOME_META) as IslandBiome[]);
 
 function isValidCoord(n: unknown): n is number {
   return typeof n === "number" && Number.isInteger(n) && n >= 0 && n < MAP_SIZE;
@@ -113,6 +128,16 @@ export function validateSaveData(raw: unknown): ValidationResult {
     : "summer";
   const autoSeason = Boolean(obj["autoSeason"]);
   const savedAt = typeof obj["savedAt"] === "string" ? obj["savedAt"] : new Date().toISOString();
+  const seed =
+    typeof obj["seed"] === "string" && obj["seed"].trim()
+      ? normalizeSeed(obj["seed"])
+      : DEFAULT_ISLAND_CONFIG.seed;
+  const archetype: IslandArchetype = VALID_ARCHETYPES.has(obj["archetype"] as IslandArchetype)
+    ? (obj["archetype"] as IslandArchetype)
+    : DEFAULT_ISLAND_CONFIG.archetype;
+  const biome: IslandBiome = VALID_BIOMES.has(obj["biome"] as IslandBiome)
+    ? (obj["biome"] as IslandBiome)
+    : DEFAULT_ISLAND_CONFIG.biome;
 
   const rawRes = obj["resources"];
   if (!rawRes || typeof rawRes !== "object") {
@@ -216,6 +241,9 @@ export function validateSaveData(raw: unknown): ValidationResult {
   const data: VillageSaveData = {
     schemaVersion: SAVE_SCHEMA_VERSION,
     savedAt,
+    seed,
+    archetype,
+    biome,
     timeOfDay,
     season,
     autoSeason,
@@ -231,6 +259,9 @@ export function validateSaveData(raw: unknown): ValidationResult {
     data,
     summary: {
       savedAt,
+      seed,
+      archetype,
+      biome,
       buildingCount: buildings.length,
       villagerCount: villagers.length,
       season,
@@ -333,5 +364,32 @@ export function decodeShareHash(hash: string): ValidationResult | null {
     return parseSaveJson(json);
   } catch {
     return { ok: false, error: "Could not decode shared village link." };
+  }
+}
+
+export function encodeSeedHash(config: IslandConfig): string {
+  const params = new URLSearchParams();
+  params.set("seed", normalizeSeed(config.seed));
+  params.set("archetype", config.archetype);
+  params.set("biome", config.biome);
+  return `#${params.toString()}`;
+}
+
+export function decodeSeedHash(hash: string): IslandConfig | null {
+  if (!hash.startsWith("#seed=")) return null;
+  try {
+    const params = new URLSearchParams(hash.slice(1));
+    const rawSeed = params.get("seed");
+    if (!rawSeed) return null;
+    const rawArch = params.get("archetype") as IslandArchetype | null;
+    const rawBiome = params.get("biome") as IslandBiome | null;
+    return {
+      seed: normalizeSeed(rawSeed),
+      archetype:
+        rawArch && VALID_ARCHETYPES.has(rawArch) ? rawArch : DEFAULT_ISLAND_CONFIG.archetype,
+      biome: rawBiome && VALID_BIOMES.has(rawBiome) ? rawBiome : DEFAULT_ISLAND_CONFIG.biome,
+    };
+  } catch {
+    return null;
   }
 }

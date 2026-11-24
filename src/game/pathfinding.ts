@@ -40,9 +40,24 @@ const DIRS: readonly [number, number, number][] = [
   [-1, -1, Math.SQRT2],
 ];
 
+export function getWalkElevation(tile: GridTile): number {
+  return tile.hasBridge ? 0.14 : tile.elevation;
+}
+
+export function canTraverseStep(
+  fromTile: GridTile,
+  toTile: GridTile,
+  isDiagonal: boolean,
+): boolean {
+  const elevDiff = Math.abs(getWalkElevation(toTile) - getWalkElevation(fromTile));
+  if (elevDiff <= 0.25) return true;
+  if (isDiagonal) return false;
+  return elevDiff <= 0.55 && (Boolean(fromTile.hasSteps) || Boolean(toTile.hasSteps));
+}
+
 /**
  * Returns the traversal cost multiplier for a grid tile, or `Infinity` if impassable.
- * Cobble Paths (and future Bridges) are strongly preferred so villagers naturally follow roads.
+ * Cobble Paths, Stone Steps, and Bridges are strongly preferred so villagers naturally follow roads.
  */
 export function getTileMoveCost(
   tile: GridTile | null,
@@ -70,7 +85,7 @@ export function getTileMoveCost(
   let cost: number;
   switch (tile.terrain) {
     case "path":
-      cost = MIN_TILE_COST; // Strongly preferred cobble road
+      cost = MIN_TILE_COST; // Strongly preferred cobble road / stone steps
       break;
     case "grass":
       cost = 1.0;
@@ -109,7 +124,7 @@ function coordKey(gx: number, gz: number): number {
 }
 
 /**
- * Computes an optimal A* grid path from `(startGx, startGz)` to `(goalGx, goalGz)`.
+ * Computes an optimal elevation-aware A* grid path from `(startGx, startGz)` to `(goalGx, goalGz)`.
  * Returns an array of grid coordinates (excluding the start tile) or `null` if unreachable.
  */
 export function findGridPath(
@@ -135,6 +150,8 @@ export function findGridPath(
     return null;
   }
 
+  const goalTileRef = world.getTile(goalGx, goalGz);
+
   const isGoalReached = (gx: number, gz: number): boolean => {
     if (goalAdjacent) {
       const dx = Math.abs(gx - goalGx);
@@ -142,7 +159,9 @@ export function findGridPath(
       // Any cardinal or diagonal neighbor next to the goal (and not the goal building itself)
       if (dx <= 1 && dz <= 1 && !(dx === 0 && dz === 0)) {
         const t = world.getTile(gx, gz);
-        return t !== null && t.terrain !== "water" && t.buildingId === null;
+        if (!t || t.terrain === "water" || t.buildingId !== null) return false;
+        if (!goalTileRef) return true;
+        return canTraverseStep(t, goalTileRef, dx !== 0 && dz !== 0);
       }
       return false;
     }
@@ -238,6 +257,8 @@ export function findGridPath(
       return path;
     }
 
+    const currTile = world.getTile(cx, cz);
+    if (!currTile) continue;
     const currG = gScore[currKey]!;
 
     for (const [dx, dz, stepDist] of DIRS) {
@@ -251,10 +272,13 @@ export function findGridPath(
       const isGoalTile = nx === goalGx && nz === goalGz;
       const neighborTile = world.getTile(nx, nz);
       const moveCost = getTileMoveCost(neighborTile, false, isGoalTile, allowGoalBuilding);
-      if (!Number.isFinite(moveCost)) continue;
+      if (!neighborTile || !Number.isFinite(moveCost)) continue;
 
-      // Prevent diagonal corner-cutting past buildings or water
-      if (dx !== 0 && dz !== 0) {
+      const isDiag = dx !== 0 && dz !== 0;
+      if (!canTraverseStep(currTile, neighborTile, isDiag)) continue;
+
+      // Prevent diagonal corner-cutting past buildings, water, or terrace cliffs
+      if (isDiag) {
         const orthoA = world.getTile(cx + dx, cz);
         const orthoB = world.getTile(cx, cz + dz);
         const costA = getTileMoveCost(
@@ -269,7 +293,13 @@ export function findGridPath(
           cx === goalGx && cz + dz === goalGz,
           allowGoalBuilding,
         );
-        if (!Number.isFinite(costA) || !Number.isFinite(costB)) continue;
+        if (!orthoA || !orthoB || !Number.isFinite(costA) || !Number.isFinite(costB)) continue;
+        if (
+          !canTraverseStep(currTile, orthoA, false) ||
+          !canTraverseStep(currTile, orthoB, false)
+        ) {
+          continue;
+        }
       }
 
       const tentativeG = currG + moveCost * stepDist;

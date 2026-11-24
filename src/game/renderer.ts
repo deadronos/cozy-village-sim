@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { WebGPURenderer } from "three/webgpu";
 import type { Season, TimeOfDay } from "./types.ts";
 
 export interface RendererContext {
@@ -12,6 +13,7 @@ export interface RendererContext {
         domElement: HTMLCanvasElement;
       };
   backend: "WebGPU" | "WebGL2";
+  supportsTSL: boolean;
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
   controls: OrbitControls;
@@ -49,7 +51,7 @@ const SKY_PRESETS: Record<
     fog: 0xf5d6ad,
     sunColor: 0xffb86b,
     sunIntensity: 2.5,
-    sunPos: [30, 16, 14],
+    sunPos: [30, 21, 14],
     hemiSky: 0xffe0b5,
     hemiGround: 0x6e5f3d,
     hemiIntensity: 0.9,
@@ -68,29 +70,28 @@ const SKY_PRESETS: Record<
 
 export async function createRendererContext(canvas: HTMLCanvasElement): Promise<RendererContext> {
   let backend: "WebGPU" | "WebGL2" = "WebGL2";
+  let supportsTSL = false;
   let renderer: RendererContext["renderer"];
 
-  // Prefer Three.js WebGPURenderer when navigator.gpu is available, with seamless WebGL2 fallback.
-  if (typeof navigator !== "undefined" && "gpu" in navigator) {
-    try {
-      const webgpuMod = await import("three/webgpu");
-      const gpuRenderer = new webgpuMod.WebGPURenderer({
-        canvas,
-        antialias: true,
-        powerPreference: "high-performance",
-      });
-      gpuRenderer.shadowMap.enabled = true;
-      gpuRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
-      gpuRenderer.toneMapping = THREE.ACESFilmicToneMapping;
-      gpuRenderer.toneMappingExposure = 1.08;
-      await gpuRenderer.init();
-      backend = "WebGPU";
-      renderer = gpuRenderer;
-    } catch {
-      backend = "WebGL2";
-      renderer = createWebGLFallback(canvas);
-    }
-  } else {
+  // Prefer Three.js WebGPURenderer (which uses WebGPU when available or WebGLBackend with TSL).
+  try {
+    const gpuRenderer = new WebGPURenderer({
+      canvas,
+      antialias: true,
+      powerPreference: "high-performance",
+    });
+    gpuRenderer.shadowMap.enabled = true;
+    gpuRenderer.shadowMap.type = THREE.PCFShadowMap;
+    gpuRenderer.toneMapping = THREE.ACESFilmicToneMapping;
+    gpuRenderer.toneMappingExposure = 1.08;
+    await gpuRenderer.init();
+    const backendObj = gpuRenderer.backend as { isWebGPUBackend?: boolean } | undefined;
+    backend = backendObj?.isWebGPUBackend ? "WebGPU" : "WebGL2";
+    supportsTSL = true;
+    renderer = gpuRenderer;
+  } catch {
+    backend = "WebGL2";
+    supportsTSL = false;
     renderer = createWebGLFallback(canvas);
   }
 
@@ -135,8 +136,8 @@ export async function createRendererContext(canvas: HTMLCanvasElement): Promise<
   sunLight.castShadow = true;
   sunLight.shadow.mapSize.set(2048, 2048);
   sunLight.shadow.camera.near = 2;
-  sunLight.shadow.camera.far = 90;
-  const d = 28;
+  sunLight.shadow.camera.far = 100;
+  const d = 32;
   sunLight.shadow.camera.left = -d;
   sunLight.shadow.camera.right = d;
   sunLight.shadow.camera.top = d;
@@ -219,6 +220,7 @@ export async function createRendererContext(canvas: HTMLCanvasElement): Promise<
   return {
     renderer,
     backend,
+    supportsTSL,
     scene,
     camera,
     controls,

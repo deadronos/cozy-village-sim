@@ -1,8 +1,15 @@
 import type { CozyAudio } from "./audio.ts";
+import {
+  BIOME_SPECS,
+  generateIslandLayout,
+  generateRandomSeed,
+  normalizeSeed,
+} from "./islandGen.ts";
 import type { VillageSimulation } from "./simulation.ts";
 import {
   clearAutosave,
   deleteSlot,
+  encodeSeedHash,
   encodeShareHash,
   loadFromSlot,
   parseSaveJson,
@@ -11,11 +18,18 @@ import {
   type ValidationResult,
 } from "./storage.ts";
 import {
+  ARCHETYPE_META,
+  BIOME_META,
   BUILDING_DEFS,
+  DEFAULT_ISLAND_CONFIG,
   JOB_META,
+  MAP_SIZE,
   SEASON_META,
   TRAIT_META,
   type BuildingKind,
+  type IslandArchetype,
+  type IslandBiome,
+  type IslandConfig,
   type Season,
   type TimeOfDay,
   type ToolMode,
@@ -26,6 +40,7 @@ export interface HudCallbacks {
   onTimeOfDayChange(tod: TimeOfDay): void;
   onSeasonChange(season: Season): void;
   onFocusPosition(x: number, z: number): void;
+  onNewIsland(config: IslandConfig): void;
 }
 
 const BUILD_ORDER: BuildingKind[] = [
@@ -47,6 +62,17 @@ const BUILD_ORDER: BuildingKind[] = [
 const DECOR_ORDER: BuildingKind[] = ["wood_fence", "stone_wall", "lantern", "flower_box", "bench"];
 
 const SEASON_ORDER: Season[] = ["spring", "summer", "autumn", "winter"];
+const ARCHETYPE_ORDER: IslandArchetype[] = [
+  "classic_cove",
+  "archipelago",
+  "river_valley",
+  "highland_terrace",
+];
+const BIOME_ORDER: IslandBiome[] = ["meadow", "pine_fjord", "golden_coast", "blossom_isle"];
+
+function hexCss(hex: number): string {
+  return `#${hex.toString(16).padStart(6, "0")}`;
+}
 
 export class CozyHud {
   private root: HTMLElement;
@@ -58,6 +84,8 @@ export class CozyHud {
   private activeTab: "build" | "decor" | "paint" = "build";
   private activeTool: ToolMode = { category: "select" };
   private saveModalOpen = false;
+  private newIslandModalOpen = false;
+  private draftIsland: IslandConfig = { ...DEFAULT_ISLAND_CONFIG };
   private importDraft = "";
   private importValidation: ValidationResult | null = null;
   private modalFeedback = "";
@@ -78,7 +106,7 @@ export class CozyHud {
   }
 
   public get isModalOpen(): boolean {
-    return this.saveModalOpen;
+    return this.saveModalOpen || this.newIslandModalOpen;
   }
 
   public setTool(tool: ToolMode): void {
@@ -87,11 +115,61 @@ export class CozyHud {
     this.render();
   }
 
-  public closeModal(): void {
-    if (!this.saveModalOpen) return;
+  public openNewIslandModal(): void {
+    this.draftIsland = { ...this.sim.getIslandConfig() };
+    this.newIslandModalOpen = true;
     this.saveModalOpen = false;
     this.modalFeedback = "";
     this.render();
+  }
+
+  public closeModal(): void {
+    if (!this.isModalOpen) return;
+    this.saveModalOpen = false;
+    this.newIslandModalOpen = false;
+    this.modalFeedback = "";
+    this.render();
+  }
+
+  /**
+   * Updates villager roster and inspector status text in place without replacing interactive DOM nodes.
+   */
+  public refreshDynamicText(): void {
+    for (const v of this.sim.villagers) {
+      const statusEl = this.root.querySelector<HTMLElement>(
+        `[data-villager="${v.id}"] .roster-status`,
+      );
+      if (statusEl && statusEl.textContent !== v.statusText) {
+        statusEl.textContent = v.statusText;
+      }
+    }
+
+    const inspEl = this.root.querySelector<HTMLElement>("[data-inspector-status]");
+    if (!inspEl) return;
+
+    if (this.sim.selectedBuildingId) {
+      const b = this.sim.buildings.find((x) => x.id === this.sim.selectedBuildingId);
+      if (!b) return;
+      const def = BUILDING_DEFS[b.kind];
+      const worker = b.workerId ? this.sim.villagers.find((v) => v.id === b.workerId) : null;
+      const statusLine = !b.constructed
+        ? `Under construction (${Math.floor(b.buildProgress * 100)}%)`
+        : worker
+          ? `Worker: ${JOB_META[worker.job].icon} ${worker.name} — ${worker.statusText}`
+          : def.job
+            ? `Needs a Cottage or Tavern for housing (+2 pop)`
+            : def.decor || def.walkable
+              ? `+${def.coziness} Coziness`
+              : `Level ${b.level} · +${def.coziness * b.level} Coziness`;
+      if (inspEl.textContent !== statusLine) {
+        inspEl.textContent = statusLine;
+      }
+    } else if (this.sim.selectedVillagerId) {
+      const v = this.sim.villagers.find((x) => x.id === this.sim.selectedVillagerId);
+      if (v && inspEl.textContent !== v.statusText) {
+        inspEl.textContent = v.statusText;
+      }
+    }
   }
 
   public render(): void {
@@ -103,6 +181,7 @@ export class CozyHud {
     const breadBonusPct = Math.round((this.sim.getBreadSpeedBonus() - 1) * 100);
     const tod = this.sim.timeOfDay;
     const season = this.sim.season;
+    const cfg = this.sim.getIslandConfig();
 
     const hintText =
       this.activeTool.category === "build"
@@ -119,6 +198,7 @@ export class CozyHud {
           <div class="glass-bar">
             <div class="title-pill">
               <span>🏡 Meadowbrook</span>
+              <button class="seed-pill" data-open-island="1" title="${ARCHETYPE_META[cfg.archetype].label} · ${BIOME_META[cfg.biome].label} (Click to generate new island)">${ARCHETYPE_META[cfg.archetype].icon} ${this.escapeHtml(cfg.seed)}</button>
               <span class="backend-badge">${this.backend}</span>
             </div>
             <div class="resource-group">
@@ -150,12 +230,14 @@ export class CozyHud {
           <button class="icon-btn ${this.sim.speedMultiplier === 1 ? "active" : ""}" data-speed="1" title="Normal speed">1x</button>
           <button class="icon-btn ${this.sim.speedMultiplier === 2 ? "active" : ""}" data-speed="2" title="Fast speed">2x</button>
           <button class="icon-btn" data-mute="1" title="Toggle cozy audio">${this.audio.muted ? "🔇" : "🔊"}</button>
+          <button class="icon-btn ${this.newIslandModalOpen ? "active" : ""}" data-open-island="1" title="New Island & Map Seed Generator">🗺️</button>
           <button class="icon-btn ${this.saveModalOpen ? "active" : ""}" data-open-save="1" title="Save, Load & Share JSON">💾</button>
         </div>
       </div>
 
       ${this.renderInspectorHtml()}
       ${this.saveModalOpen ? this.renderSaveModalHtml() : ""}
+      ${this.newIslandModalOpen ? this.renderNewIslandModalHtml() : ""}
 
       <div class="hud-bottom-wrap">
         <div class="hint-bar">${hintText}</div>
@@ -180,6 +262,9 @@ export class CozyHud {
       </div>
     `;
 
+    if (this.newIslandModalOpen) {
+      this.drawSeedPreviewCanvas();
+    }
     this.bindEvents();
   }
 
@@ -286,7 +371,7 @@ export class CozyHud {
             <button class="icon-btn" data-close-inspector="1">✕</button>
           </div>
           <div class="inspector-desc">${def.description}</div>
-          <div class="inspector-desc" style="color:var(--text-cream)">${statusLine}</div>
+          <div class="inspector-desc" data-inspector-status="1" style="color:var(--text-cream)">${statusLine}</div>
           <div class="inspector-actions">
             ${
               isUpgradable
@@ -317,7 +402,7 @@ export class CozyHud {
             <span>${trait.icon} <strong>${trait.label}</strong></span>
             <span class="trait-desc">${trait.description}</span>
           </div>
-          <div class="inspector-desc" style="color:var(--text-cream)">${v.statusText}</div>
+          <div class="inspector-desc" data-inspector-status="1" style="color:var(--text-cream)">${v.statusText}</div>
         </div>
       `;
     }
@@ -331,7 +416,7 @@ export class CozyHud {
         const res = loadFromSlot(slot);
         const info =
           res && res.ok
-            ? `${SEASON_META[res.summary.season].icon} ${res.summary.buildingCount} bldgs · ${res.summary.villagerCount} villagers · ${new Date(res.summary.savedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+            ? `${ARCHETYPE_META[res.summary.archetype].icon} ${this.escapeHtml(res.summary.seed)} · ${SEASON_META[res.summary.season].icon} ${res.summary.buildingCount} bldgs · ${res.summary.villagerCount} villagers`
             : "Empty slot";
         return `
           <div class="slot-row">
@@ -355,7 +440,7 @@ export class CozyHud {
         const s = this.importValidation.summary;
         previewHtml = `
           <div class="preview-box preview-box--ok">
-            ✅ Ready to load: <strong>${s.buildingCount}</strong> buildings, <strong>${s.villagerCount}</strong> villagers, ${SEASON_META[s.season].icon} ${SEASON_META[s.season].label}
+            ✅ Ready to load: <strong>${s.buildingCount}</strong> buildings, <strong>${s.villagerCount}</strong> villagers, ${ARCHETYPE_META[s.archetype].icon} ${this.escapeHtml(s.seed)} (${BIOME_META[s.biome].label}), ${SEASON_META[s.season].icon} ${SEASON_META[s.season].label}
             (🪵${s.resources.wood} 🪚${s.resources.planks} 🪨${s.resources.stone} 🌾${s.resources.food} 🥐${s.resources.bread})
           </div>
         `;
@@ -377,8 +462,9 @@ export class CozyHud {
           <div class="modal-section">
             <div class="modal-section-title">Local Save Slots (Auto-save enabled)</div>
             ${slotRows}
-            <div style="display:flex;justify-content:flex-end;margin-top:4px;">
-              <button class="btn-danger" data-new-village="1">🌱 Reset to New Island</button>
+            <div class="modal-actions-row" style="justify-content:flex-end;margin-top:4px;">
+              <button class="icon-btn" data-open-island="1">🗺️ New Island & Seed...</button>
+              <button class="btn-danger" data-new-village="1">🌱 Reset Current Island</button>
             </div>
           </div>
 
@@ -408,8 +494,204 @@ export class CozyHud {
     `;
   }
 
+  private renderNewIslandModalHtml(): string {
+    const archCards = ARCHETYPE_ORDER.map((arch) => {
+      const meta = ARCHETYPE_META[arch];
+      const active = this.draftIsland.archetype === arch;
+      return `
+        <button class="arch-card ${active ? "active" : ""}" data-arch="${arch}">
+          <div class="arch-card-head"><span>${meta.icon}</span><strong>${meta.label}</strong></div>
+          <div class="arch-card-desc">${meta.description}</div>
+        </button>
+      `;
+    }).join("");
+
+    const biomePills = BIOME_ORDER.map((biome) => {
+      const meta = BIOME_META[biome];
+      const active = this.draftIsland.biome === biome;
+      return `
+        <button class="biome-pill ${active ? "active" : ""}" data-biome="${biome}" title="${meta.description}">
+          <span class="biome-swatch" style="background:${meta.swatch};"></span>
+          <span>${meta.icon} ${meta.label}</span>
+        </button>
+      `;
+    }).join("");
+
+    const draftArch = ARCHETYPE_META[this.draftIsland.archetype];
+    const draftBiome = BIOME_META[this.draftIsland.biome];
+
+    return `
+      <div class="modal-backdrop" data-modal-backdrop="1">
+        <div class="modal-card modal-card--wide">
+          <div class="inspector-header">
+            <div class="inspector-title">🗺️ New Island & Map Seed</div>
+            <button class="icon-btn" data-close-island="1">✕</button>
+          </div>
+
+          ${this.modalFeedback ? `<div class="toast-msg">${this.modalFeedback}</div>` : ""}
+
+          <div class="modal-section">
+            <div class="modal-section-title">Map Seed (Shareable with friends)</div>
+            <div class="seed-row">
+              <input
+                type="text"
+                class="seed-input"
+                data-seed-input="1"
+                maxlength="24"
+                value="${this.escapeHtml(this.draftIsland.seed)}"
+                placeholder="e.g. MEADOW-42"
+              />
+              <button class="icon-btn" data-seed-random="1" title="Generate random cozy seed">🎲 Random</button>
+              <button class="icon-btn" data-seed-copy-link="1" title="Copy shareable seed URL">🔗 Copy Seed Link</button>
+            </div>
+          </div>
+
+          <div class="modal-section">
+            <div class="modal-section-title">Island Archetype & Live Preview</div>
+            <div class="island-grid">
+              <div class="seed-preview-wrap">
+                <canvas width="144" height="144" class="seed-preview-canvas" data-seed-preview="1"></canvas>
+                <div class="seed-preview-meta" data-seed-meta="1">
+                  ${draftArch.icon} ${draftArch.label} · ${draftBiome.icon} ${draftBiome.label}
+                </div>
+                <div class="seed-preview-legend">★ Town Square · Brown: Bridges/Steps</div>
+              </div>
+              <div class="archetype-grid">
+                ${archCards}
+              </div>
+            </div>
+          </div>
+
+          <div class="modal-section">
+            <div class="modal-section-title">Biome Palette</div>
+            <div class="biome-row">
+              ${biomePills}
+            </div>
+          </div>
+
+          <div class="modal-actions-row" style="justify-content:flex-end;padding-top:4px;">
+            <button class="icon-btn" data-close-island="1">Cancel</button>
+            <button class="btn-primary" style="flex:0 0 auto;padding:8px 16px;" data-generate-island="1">✨ Generate & Start Village</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private drawSeedPreviewCanvas(): void {
+    const canvas = this.root.querySelector<HTMLCanvasElement>("[data-seed-preview]");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const layout = generateIslandLayout(this.draftIsland);
+    const spec = BIOME_SPECS[layout.config.biome];
+    const palette = spec.terrainPalette.summer;
+    const water = spec.waterPalette.summer;
+    const cell = canvas.width / MAP_SIZE;
+
+    ctx.fillStyle = hexCss(water.deep);
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    for (let gz = 0; gz < MAP_SIZE; gz++) {
+      for (let gx = 0; gx < MAP_SIZE; gx++) {
+        const t = layout.tiles[gz]![gx]!;
+        const x = gx * cell;
+        const y = gz * cell;
+
+        if (t.terrain === "water") {
+          if (t.isRiver) {
+            ctx.fillStyle = hexCss(water.river);
+            ctx.fillRect(x, y, cell, cell);
+          } else {
+            // Subtle shallow ring near coast
+            const hasLand = [
+              layout.tiles[gz]?.[gx - 1],
+              layout.tiles[gz]?.[gx + 1],
+              layout.tiles[gz - 1]?.[gx],
+              layout.tiles[gz + 1]?.[gx],
+            ].some((n) => n && n.terrain !== "water");
+            if (hasLand) {
+              ctx.fillStyle = hexCss(water.shallow);
+              ctx.fillRect(x, y, cell, cell);
+            }
+          }
+          continue;
+        }
+
+        if (t.terrain === "sand") {
+          ctx.fillStyle = hexCss(palette.sand);
+        } else if (t.terrain === "meadow") {
+          ctx.fillStyle = hexCss(palette.meadow);
+        } else {
+          ctx.fillStyle = hexCss(palette.grass);
+        }
+        ctx.fillRect(x, y, cell, cell);
+
+        // Elevation shading on Highland Terrace
+        if (t.elevation >= 0.8) {
+          ctx.fillStyle = "rgba(255, 255, 255, 0.24)";
+          ctx.fillRect(x, y, cell, cell);
+        } else if (t.elevation >= 0.4) {
+          ctx.fillStyle = "rgba(255, 255, 255, 0.12)";
+          ctx.fillRect(x, y, cell, cell);
+        }
+
+        if (t.hasSteps) {
+          ctx.fillStyle = "#c9bfb0";
+          ctx.fillRect(x + 0.5, y + 0.5, cell - 1, cell - 1);
+        } else if (t.prop === "tree_oak" || t.prop === "tree_pine") {
+          ctx.fillStyle =
+            t.prop === "tree_oak"
+              ? hexCss(spec.oakColors.summer[0] ?? 0x4f943d)
+              : hexCss(spec.pineColors.summer[0] ?? 0x2e6a39);
+          ctx.beginPath();
+          ctx.arc(x + cell * 0.5, y + cell * 0.5, cell * 0.34, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (t.prop === "rock") {
+          ctx.fillStyle = "#6e737b";
+          ctx.fillRect(x + 1.5, y + 1.5, cell - 3, cell - 3);
+        }
+      }
+    }
+
+    // Highlight starter bridges
+    ctx.fillStyle = "#9b6b3c";
+    for (const br of layout.starterBridges) {
+      ctx.fillRect(br.gx * cell + 0.5, br.gz * cell + 0.5, cell - 1, cell - 1);
+    }
+
+    // Highlight starter farmfields
+    ctx.fillStyle = "#eab949";
+    for (const f of layout.starterFarms) {
+      ctx.fillRect(f.gx * cell + 1, f.gz * cell + 1, cell - 2, cell - 2);
+    }
+
+    // Highlight Town Hall center
+    const tcX = (layout.townCenter.gx + 0.5) * cell;
+    const tcY = (layout.townCenter.gz + 0.5) * cell;
+    ctx.fillStyle = "#ffe574";
+    ctx.strokeStyle = "#2b1d10";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(tcX, tcY, cell * 0.75, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    const metaEl = this.root.querySelector<HTMLElement>("[data-seed-meta]");
+    if (metaEl) {
+      const a = ARCHETYPE_META[layout.config.archetype];
+      const b = BIOME_META[layout.config.biome];
+      metaEl.textContent = `${a.icon} ${a.label} · ${b.icon} ${b.label} (${layout.config.seed})`;
+    }
+  }
+
   private escapeHtml(str: string): string {
-    return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return str
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
   }
 
   private bindEvents(): void {
@@ -475,9 +757,20 @@ export class CozyHud {
       this.render();
     });
 
+    this.root.querySelectorAll<HTMLElement>("[data-open-island]").forEach((el) => {
+      el.addEventListener("click", () => {
+        if (this.newIslandModalOpen) {
+          this.closeModal();
+        } else {
+          this.openNewIslandModal();
+        }
+      });
+    });
+
     const openSaveBtn = this.root.querySelector<HTMLElement>("[data-open-save]");
     openSaveBtn?.addEventListener("click", () => {
       this.saveModalOpen = !this.saveModalOpen;
+      this.newIslandModalOpen = false;
       this.modalFeedback = "";
       this.render();
     });
@@ -513,13 +806,16 @@ export class CozyHud {
       if (b) this.sim.demolishAt(b.gx, b.gz);
     });
 
-    // Save/Load modal events
-    if (this.saveModalOpen) {
+    // Shared backdrop close handler
+    if (this.isModalOpen) {
       const backdrop = this.root.querySelector<HTMLElement>("[data-modal-backdrop]");
       backdrop?.addEventListener("click", (ev) => {
         if (ev.target === backdrop) this.closeModal();
       });
+    }
 
+    // Save/Load modal events
+    if (this.saveModalOpen) {
       this.root
         .querySelector<HTMLElement>("[data-close-save]")
         ?.addEventListener("click", () => this.closeModal());
@@ -558,7 +854,7 @@ export class CozyHud {
       this.root.querySelector<HTMLElement>("[data-new-village]")?.addEventListener("click", () => {
         clearAutosave();
         this.sim.resetToStarterVillage();
-        this.modalFeedback = "Started a fresh Meadowbrook island!";
+        this.modalFeedback = "Reset current island to starter village!";
         this.render();
       });
 
@@ -643,6 +939,70 @@ export class CozyHud {
             this.saveModalOpen = false;
             this.render();
           }
+        });
+    }
+
+    // New Island / Seed modal events
+    if (this.newIslandModalOpen) {
+      this.root
+        .querySelectorAll<HTMLElement>("[data-close-island]")
+        .forEach((el) => el.addEventListener("click", () => this.closeModal()));
+
+      const seedInput = this.root.querySelector<HTMLInputElement>("[data-seed-input]");
+      seedInput?.addEventListener("input", () => {
+        this.draftIsland.seed = seedInput.value;
+        this.drawSeedPreviewCanvas();
+      });
+
+      this.root.querySelector<HTMLElement>("[data-seed-random]")?.addEventListener("click", () => {
+        this.draftIsland.seed = generateRandomSeed(
+          this.draftIsland.archetype,
+          this.draftIsland.biome,
+        );
+        this.modalFeedback = "";
+        this.render();
+      });
+
+      this.root
+        .querySelector<HTMLElement>("[data-seed-copy-link]")
+        ?.addEventListener("click", () => {
+          const normalized: IslandConfig = {
+            ...this.draftIsland,
+            seed: normalizeSeed(this.draftIsland.seed),
+          };
+          const shareUrl = `${window.location.origin}${window.location.pathname}${encodeSeedHash(normalized)}`;
+          void navigator.clipboard?.writeText(shareUrl);
+          this.modalFeedback = `Copied seed link for ${normalized.seed}!`;
+          this.render();
+        });
+
+      this.root.querySelectorAll<HTMLElement>("[data-arch]").forEach((el) => {
+        el.addEventListener("click", () => {
+          this.draftIsland.archetype = el.dataset["arch"] as IslandArchetype;
+          this.render();
+        });
+      });
+
+      this.root.querySelectorAll<HTMLElement>("[data-biome]").forEach((el) => {
+        el.addEventListener("click", () => {
+          this.draftIsland.biome = el.dataset["biome"] as IslandBiome;
+          this.render();
+        });
+      });
+
+      this.root
+        .querySelector<HTMLElement>("[data-generate-island]")
+        ?.addEventListener("click", () => {
+          const finalConfig: IslandConfig = {
+            seed: normalizeSeed(this.draftIsland.seed),
+            archetype: this.draftIsland.archetype,
+            biome: this.draftIsland.biome,
+          };
+          clearAutosave();
+          this.newIslandModalOpen = false;
+          this.modalFeedback = "";
+          this.callbacks.onNewIsland(finalConfig);
+          this.render();
         });
     }
   }

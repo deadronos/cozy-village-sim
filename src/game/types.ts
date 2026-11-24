@@ -2,6 +2,78 @@ import type * as THREE from "three";
 
 export type TerrainType = "water" | "sand" | "grass" | "path" | "farm" | "meadow";
 
+export type IslandArchetype = "classic_cove" | "archipelago" | "river_valley" | "highland_terrace";
+
+export type IslandBiome = "meadow" | "pine_fjord" | "golden_coast" | "blossom_isle";
+
+export interface IslandConfig {
+  seed: string;
+  archetype: IslandArchetype;
+  biome: IslandBiome;
+}
+
+export const DEFAULT_ISLAND_CONFIG: IslandConfig = {
+  seed: "MEADOW-42",
+  archetype: "classic_cove",
+  biome: "meadow",
+};
+
+export const ARCHETYPE_META: Record<
+  IslandArchetype,
+  { label: string; icon: string; description: string }
+> = {
+  classic_cove: {
+    label: "Classic Cove",
+    icon: "🏝️",
+    description: "Lush sheltered island with gentle sandy bays.",
+  },
+  archipelago: {
+    label: "Archipelago",
+    icon: "🌊",
+    description: "Three cozy islets linked by wooden footbridges.",
+  },
+  river_valley: {
+    label: "River Valley",
+    icon: "🏞️",
+    description: "Winding freshwater stream dividing fertile banks.",
+  },
+  highland_terrace: {
+    label: "Highland Terrace",
+    icon: "⛰️",
+    description: "Tiered green plateaus connected by stone steps.",
+  },
+};
+
+export const BIOME_META: Record<
+  IslandBiome,
+  { label: string; icon: string; description: string; swatch: string }
+> = {
+  meadow: {
+    label: "Lush Meadow",
+    icon: "🌿",
+    description: "Balanced oak & pine woods with wildflower meadows.",
+    swatch: "#73b659",
+  },
+  pine_fjord: {
+    label: "Pine Fjord",
+    icon: "🌲",
+    description: "Evergreen highlands, dense pines & mossy crags.",
+    swatch: "#3d7a47",
+  },
+  golden_coast: {
+    label: "Sunlit Coast",
+    icon: "☀️",
+    description: "Warm golden grasslands, wide sands & oak groves.",
+    swatch: "#c8b24d",
+  },
+  blossom_isle: {
+    label: "Blossom Isle",
+    icon: "🌸",
+    description: "Sakura-tinted oak canopies & abundant wild blooms.",
+    swatch: "#f2a4be",
+  },
+};
+
 export type ResourcePropType = "tree_pine" | "tree_oak" | "rock" | "stump" | null;
 
 export type BuildingKind =
@@ -95,11 +167,12 @@ export interface GridTile {
   terrain: TerrainType;
   elevation: number;
   prop: ResourcePropType;
-  propMesh: THREE.Object3D | null;
-  decorMesh: THREE.Object3D | null;
   cropStage: number; // 0..1 for farmfields
   buildingId: string | null;
   hasBridge?: boolean;
+  isRiver?: boolean;
+  hasSteps?: boolean;
+  stepRotation?: number; // 0..3, facing uphill
   regrowTimer: number;
 }
 
