@@ -41,6 +41,10 @@ export interface HudCallbacks {
   onSeasonChange(season: Season): void;
   onFocusPosition(x: number, z: number): void;
   onNewIsland(config: IslandConfig): void;
+  onPhotoModeChange(enabled: boolean): void;
+  onTurntableChange(enabled: boolean): void;
+  onTiltShiftChange(enabled: boolean): void;
+  onCapturePostcard(options: { tiltShift: boolean; postcardFrame: boolean }): void;
 }
 
 const BUILD_ORDER: BuildingKind[] = [
@@ -90,6 +94,13 @@ export class CozyHud {
   private importValidation: ValidationResult | null = null;
   private modalFeedback = "";
 
+  public photoMode = false;
+  public turntable = false;
+  public tiltShift = false;
+  public postcardFrame = true;
+  private photoToast = "";
+  private photoToastTimeout: ReturnType<typeof setTimeout> | null = null;
+
   constructor(
     root: HTMLElement,
     sim: VillageSimulation,
@@ -129,6 +140,42 @@ export class CozyHud {
     this.newIslandModalOpen = false;
     this.modalFeedback = "";
     this.render();
+  }
+
+  public togglePhotoMode(force?: boolean): void {
+    const next = force !== undefined ? force : !this.photoMode;
+    if (next === this.photoMode) return;
+    this.photoMode = next;
+    if (this.photoMode) {
+      this.saveModalOpen = false;
+      this.newIslandModalOpen = false;
+      this.sim.selectedBuildingId = null;
+      this.sim.selectedVillagerId = null;
+    }
+    this.callbacks.onPhotoModeChange(this.photoMode);
+    this.callbacks.onTiltShiftChange(this.photoMode && this.tiltShift);
+    this.render();
+  }
+
+  public toggleTurntable(force?: boolean): void {
+    const next = force !== undefined ? force : !this.turntable;
+    if (next === this.turntable) return;
+    this.turntable = next;
+    this.callbacks.onTurntableChange(this.turntable);
+    this.render();
+  }
+
+  public showPhotoToast(message: string): void {
+    this.photoToast = message;
+    if (this.photoToastTimeout) {
+      clearTimeout(this.photoToastTimeout);
+    }
+    this.photoToastTimeout = setTimeout(() => {
+      this.photoToast = "";
+      this.photoToastTimeout = null;
+      if (this.photoMode) this.render();
+    }, 2600);
+    if (this.photoMode) this.render();
   }
 
   /**
@@ -173,6 +220,12 @@ export class CozyHud {
   }
 
   public render(): void {
+    if (this.photoMode) {
+      this.renderPhotoModeHud();
+      this.bindPhotoModeEvents();
+      return;
+    }
+
     const r = this.sim.resources;
     const pop = this.sim.villagers.length;
     const maxPop = this.sim.getMaxPopulation();
@@ -190,7 +243,7 @@ export class CozyHud {
           ? `Click & drag to paint ${this.activeTool.paint} • Esc to stop`
           : this.activeTool.category === "demolish"
             ? `Click tiles or buildings to clear • Esc to stop`
-            : `WASD pan • Right-drag or Q/E orbit • Scroll zoom • Click any building or villager to inspect`;
+            : `WASD pan • Right-drag or Q/E orbit • Scroll zoom • H Photo Mode • T Turntable`;
 
     this.root.innerHTML = `
       <div class="hud-top">
@@ -229,7 +282,8 @@ export class CozyHud {
           <button class="icon-btn ${this.sim.speedMultiplier === 0 ? "active" : ""}" data-speed="0" title="Pause">⏸</button>
           <button class="icon-btn ${this.sim.speedMultiplier === 1 ? "active" : ""}" data-speed="1" title="Normal speed">1x</button>
           <button class="icon-btn ${this.sim.speedMultiplier === 2 ? "active" : ""}" data-speed="2" title="Fast speed">2x</button>
-          <button class="icon-btn" data-mute="1" title="Toggle cozy audio">${this.audio.muted ? "🔇" : "🔊"}</button>
+          <button class="icon-btn" data-mute="1" title="Toggle cozy audio & ambient soundscape">${this.audio.muted ? "🔇" : "🔊"}</button>
+          <button class="icon-btn ${this.photoMode ? "active" : ""}" data-photo-mode="1" title="Photo Mode & Diorama Postcards (H)">📷</button>
           <button class="icon-btn ${this.newIslandModalOpen ? "active" : ""}" data-open-island="1" title="New Island & Map Seed Generator">🗺️</button>
           <button class="icon-btn ${this.saveModalOpen ? "active" : ""}" data-open-save="1" title="Save, Load & Share JSON">💾</button>
         </div>
@@ -757,6 +811,11 @@ export class CozyHud {
       this.render();
     });
 
+    const photoModeBtn = this.root.querySelector<HTMLElement>("[data-photo-mode]");
+    photoModeBtn?.addEventListener("click", () => {
+      this.togglePhotoMode();
+    });
+
     this.root.querySelectorAll<HTMLElement>("[data-open-island]").forEach((el) => {
       el.addEventListener("click", () => {
         if (this.newIslandModalOpen) {
@@ -1005,5 +1064,75 @@ export class CozyHud {
           this.render();
         });
     }
+  }
+
+  private renderPhotoModeHud(): void {
+    const tod = this.sim.timeOfDay;
+    this.root.innerHTML = `
+      <div class="photo-mode-spacer"></div>
+      <div class="photo-dock-wrap">
+        ${this.photoToast ? `<div class="toast-msg photo-toast">${this.escapeHtml(this.photoToast)}</div>` : ""}
+        <div class="hint-bar">Drag to orbit low diorama angles • WASD pan • Scroll zoom • T turntable • H exit</div>
+        <div class="glass-bar photo-dock">
+          <button class="btn-primary photo-snap-btn" data-capture-postcard="1" title="Save diorama postcard as PNG">📸 Save Postcard PNG</button>
+          <button class="icon-btn ${this.postcardFrame ? "active" : ""}" data-toggle-frame="1" title="Include warm postcard border & seed stamp">🖼️ Frame</button>
+          <button class="icon-btn ${this.tiltShift ? "active" : ""}" data-toggle-tiltshift="1" title="Toggle subtle miniature tilt-shift blur">🎞️ Tilt-Shift</button>
+          <button class="icon-btn ${this.turntable ? "active" : ""}" data-toggle-turntable="1" title="Gentle slow camera orbit around village (T)">🌀 Turntable</button>
+          <span style="opacity:0.25">|</span>
+          <button class="icon-btn ${tod === "morning" ? "active" : ""}" data-tod="morning" title="Morning sun">☀️</button>
+          <button class="icon-btn ${tod === "golden" ? "active" : ""}" data-tod="golden" title="Golden hour">🌅</button>
+          <button class="icon-btn ${tod === "dusk" ? "active" : ""}" data-tod="dusk" title="Cozy dusk">🌙</button>
+          <button class="icon-btn" data-mute="1" title="Toggle cozy audio & ambient soundscape">${this.audio.muted ? "🔇" : "🔊"}</button>
+          <button class="icon-btn" data-photo-mode="1" title="Exit Photo Mode (H / Esc)">✕ Exit</button>
+        </div>
+      </div>
+    `;
+  }
+
+  private bindPhotoModeEvents(): void {
+    this.root
+      .querySelector<HTMLElement>("[data-capture-postcard]")
+      ?.addEventListener("click", () => {
+        this.callbacks.onCapturePostcard({
+          tiltShift: this.tiltShift,
+          postcardFrame: this.postcardFrame,
+        });
+      });
+
+    this.root.querySelector<HTMLElement>("[data-toggle-frame]")?.addEventListener("click", () => {
+      this.postcardFrame = !this.postcardFrame;
+      this.render();
+    });
+
+    this.root
+      .querySelector<HTMLElement>("[data-toggle-tiltshift]")
+      ?.addEventListener("click", () => {
+        this.tiltShift = !this.tiltShift;
+        this.callbacks.onTiltShiftChange(this.tiltShift);
+        this.render();
+      });
+
+    this.root
+      .querySelector<HTMLElement>("[data-toggle-turntable]")
+      ?.addEventListener("click", () => {
+        this.toggleTurntable();
+      });
+
+    this.root.querySelectorAll<HTMLElement>("[data-tod]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const tod = el.dataset["tod"] as TimeOfDay;
+        this.callbacks.onTimeOfDayChange(tod);
+        this.render();
+      });
+    });
+
+    this.root.querySelector<HTMLElement>("[data-mute]")?.addEventListener("click", () => {
+      this.audio.muted = !this.audio.muted;
+      this.render();
+    });
+
+    this.root.querySelector<HTMLElement>("[data-photo-mode]")?.addEventListener("click", () => {
+      this.togglePhotoMode(false);
+    });
   }
 }
