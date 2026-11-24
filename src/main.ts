@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { AssetLibrary } from "./game/assets.ts";
 import { CozyAudio } from "./game/audio.ts";
 import { CloudSystem } from "./game/clouds.ts";
+import { compositePostcardCanvas, downloadPostcardPng } from "./game/postcard.ts";
 import { createRendererContext } from "./game/renderer.ts";
 import { VillageSimulation } from "./game/simulation.ts";
 import { decodeSeedHash, decodeShareHash, loadAutosave, saveAutosave } from "./game/storage.ts";
@@ -10,10 +11,12 @@ import { CozyHud } from "./game/ui.ts";
 import { IslandWorld } from "./game/world.ts";
 
 async function bootstrap(): Promise<void> {
+  const appEl = document.getElementById("app");
   const canvas = document.getElementById("game-canvas") as HTMLCanvasElement | null;
+  const vignetteEl = document.getElementById("photo-vignette");
   const hudEl = document.getElementById("hud");
   const floatingLayer = document.getElementById("floating-layer");
-  if (!canvas || !hudEl || !floatingLayer) {
+  if (!appEl || !canvas || !hudEl || !floatingLayer) {
     throw new Error("Missing required DOM elements");
   }
 
@@ -100,6 +103,8 @@ async function bootstrap(): Promise<void> {
     });
   };
 
+  let pendingPostcardCapture: { tiltShift: boolean; postcardFrame: boolean } | null = null;
+
   const hud = new CozyHud(hudEl, sim, audio, ctx.backend, {
     onToolChange(tool) {
       activeTool = tool;
@@ -119,6 +124,24 @@ async function bootstrap(): Promise<void> {
       saveAutosave(sim.exportSaveData());
       focusTownCenter();
     },
+    onPhotoModeChange(enabled) {
+      appEl.classList.toggle("photo-mode", enabled);
+      ctx.setPhotoModeCamera(enabled);
+      if (enabled) {
+        hoveredTile = null;
+        hoverRing.visible = false;
+        if (ghostMesh) ghostMesh.visible = false;
+      }
+    },
+    onTurntableChange() {
+      // Turntable state is read directly in the main loop
+    },
+    onTiltShiftChange(enabled) {
+      appEl.classList.toggle("tilt-shift-active", enabled);
+    },
+    onCapturePostcard(options) {
+      pendingPostcardCapture = options;
+    },
   });
 
   sim.onAtmosphereChanged = (tod, season) => {
@@ -127,7 +150,7 @@ async function bootstrap(): Promise<void> {
   };
 
   sim.onStateChanged = () => {
-    if (!hud.isModalOpen) hud.render();
+    if (!hud.isModalOpen && !hud.photoMode) hud.render();
   };
 
   // Restore shared village (#village=...), shared map seed (#seed=...), or local autosave on startup
@@ -259,6 +282,7 @@ async function bootstrap(): Promise<void> {
   };
 
   canvas.addEventListener("pointermove", (ev) => {
+    if (hud.photoMode) return;
     updatePointer(ev);
     hoveredTile = raycastTile();
     updateHoverVisuals();
@@ -268,6 +292,8 @@ async function bootstrap(): Promise<void> {
   });
 
   canvas.addEventListener("pointerdown", (ev) => {
+    audio.unlock();
+    if (hud.photoMode) return;
     if (ev.button !== 0) return; // Left-click only (right-click orbits)
     isPointerDown = true;
     lastPaintedKey = "";
@@ -276,12 +302,17 @@ async function bootstrap(): Promise<void> {
     applyToolAtHovered();
   });
 
+  window.addEventListener("pointerdown", () => {
+    audio.unlock();
+  });
+
   window.addEventListener("pointerup", () => {
     isPointerDown = false;
     lastPaintedKey = "";
   });
 
   window.addEventListener("keydown", (ev) => {
+    audio.unlock();
     const target = ev.target as HTMLElement | null;
     const isTyping =
       target instanceof HTMLInputElement ||
@@ -293,6 +324,10 @@ async function bootstrap(): Promise<void> {
         hud.closeModal();
         return;
       }
+      if (hud.photoMode) {
+        hud.togglePhotoMode(false);
+        return;
+      }
       hud.setTool({ category: "select" });
       sim.selectedBuildingId = null;
       sim.selectedVillagerId = null;
@@ -302,8 +337,18 @@ async function bootstrap(): Promise<void> {
 
     if (isTyping) return;
 
+    if (ev.code === "KeyH" && !hud.isModalOpen && !ev.repeat) {
+      hud.togglePhotoMode();
+      return;
+    }
+
+    if (ev.code === "KeyT" && !hud.isModalOpen && !ev.repeat) {
+      hud.toggleTurntable();
+      return;
+    }
+
     pressedKeys.add(ev.code);
-    if (ev.code === "KeyR" && activeTool.category === "build") {
+    if (ev.code === "KeyR" && activeTool.category === "build" && !hud.photoMode) {
       buildRotation = (buildRotation + 1) % 4;
       updateHoverVisuals();
     }
@@ -324,16 +369,38 @@ async function bootstrap(): Promise<void> {
     const elapsed = (now - startTime) / 1000;
 
     ctx.updateKeyboardPan(dt, pressedKeys);
+    ctx.updateTurntable(dt, hud.turntable, pressedKeys);
     ctx.controls.update();
     world.updateVisuals(elapsed);
     clouds.update(dt, elapsed, ctx.camera);
     sim.update(dt, elapsed, ctx.camera);
+
+    let windmillCount = 0;
+    let smithyCount = 0;
+    for (const b of sim.buildings) {
+      if (!b.constructed) continue;
+      if (b.kind === "windmill") windmillCount++;
+      else if (b.kind === "smithy") smithyCount++;
+    }
+    const activeSmithWorking = sim.villagers.some(
+      (v) => v.job === "smith" && v.state === "working",
+    );
+    const cameraDistance = ctx.camera.position.distanceTo(ctx.controls.target);
+    audio.updateAmbient(dt, {
+      timeOfDay: sim.timeOfDay,
+      season: sim.season,
+      windmillCount,
+      smithyCount,
+      activeSmithWorking,
+      cameraDistance,
+    });
 
     uiRefreshTimer += dt;
     if (uiRefreshTimer >= 1.2) {
       uiRefreshTimer = 0;
       if (
         !hud.isModalOpen &&
+        !hud.photoMode &&
         (sim.selectedBuildingId || sim.selectedVillagerId || sim.villagers.length > 0)
       ) {
         hud.refreshDynamicText();
@@ -347,6 +414,31 @@ async function bootstrap(): Promise<void> {
     }
 
     ctx.renderer.render(ctx.scene, ctx.camera);
+
+    if (pendingPostcardCapture) {
+      const opts = pendingPostcardCapture;
+      pendingPostcardCapture = null;
+      audio.playShutter();
+      if (vignetteEl) {
+        vignetteEl.classList.remove("shutter-flash");
+        void vignetteEl.offsetWidth;
+        vignetteEl.classList.add("shutter-flash");
+      }
+      const cfg = sim.getIslandConfig();
+      const postcard = compositePostcardCanvas(canvas, {
+        tiltShift: opts.tiltShift,
+        postcardFrame: opts.postcardFrame,
+        island: cfg,
+        season: sim.season,
+        timeOfDay: sim.timeOfDay,
+        villagerCount: sim.villagers.length,
+        buildingCount: sim.buildings.length,
+        coziness: sim.getCoziness(),
+      });
+      void downloadPostcardPng(postcard, cfg.seed).then((ok) => {
+        hud.showPhotoToast(ok ? "📸 Postcard PNG saved!" : "⚠️ Could not export PNG");
+      });
+    }
   };
 
   requestAnimationFrame(tick);

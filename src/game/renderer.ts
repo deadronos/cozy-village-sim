@@ -20,6 +20,8 @@ export interface RendererContext {
   sunLight: THREE.DirectionalLight;
   hemiLight: THREE.HemisphereLight;
   setAtmosphere(tod: TimeOfDay, season: Season): void;
+  setPhotoModeCamera(enabled: boolean): void;
+  updateTurntable(dt: number, enabled: boolean, keys: Set<string>): void;
   updateKeyboardPan(dt: number, keys: Set<string>): void;
 }
 
@@ -178,6 +180,49 @@ export async function createRendererContext(canvas: HTMLCanvasElement): Promise<
 
   const forward = new THREE.Vector3();
   const right = new THREE.Vector3();
+  let isUserOrbiting = false;
+
+  controls.addEventListener("start", () => {
+    isUserOrbiting = true;
+  });
+  controls.addEventListener("end", () => {
+    isUserOrbiting = false;
+  });
+
+  const setPhotoModeCamera = (enabled: boolean) => {
+    if (enabled) {
+      // Unlock lower horizon-level diorama angles & closer macro shots
+      controls.minDistance = 5.5;
+      controls.maxDistance = 56;
+      controls.maxPolarAngle = Math.PI * 0.485;
+      controls.minPolarAngle = Math.PI * 0.08;
+      // Allow left-drag to orbit effortlessly while in Photo Mode
+      controls.mouseButtons = {
+        LEFT: THREE.MOUSE.ROTATE,
+        MIDDLE: THREE.MOUSE.DOLLY,
+        RIGHT: THREE.MOUSE.ROTATE,
+      };
+    } else {
+      controls.minDistance = 10;
+      controls.maxDistance = 46;
+      controls.maxPolarAngle = Math.PI * 0.43;
+      controls.minPolarAngle = Math.PI * 0.14;
+      controls.mouseButtons = {
+        LEFT: null as unknown as THREE.MOUSE,
+        MIDDLE: THREE.MOUSE.DOLLY,
+        RIGHT: THREE.MOUSE.ROTATE,
+      };
+    }
+    controls.update();
+  };
+
+  const updateTurntable = (dt: number, enabled: boolean, keys: Set<string>) => {
+    if (!enabled || isUserOrbiting || keys.has("KeyQ") || keys.has("KeyE")) return;
+    const orbitSpeed = 0.13 * dt; // Gentle relaxing turntable showcase orbit
+    const offset = camera.position.clone().sub(controls.target);
+    offset.applyAxisAngle(THREE.Object3D.DEFAULT_UP, orbitSpeed);
+    camera.position.copy(controls.target).add(offset);
+  };
 
   const updateKeyboardPan = (dt: number, keys: Set<string>) => {
     const panSpeed = 18 * dt;
@@ -227,6 +272,8 @@ export async function createRendererContext(canvas: HTMLCanvasElement): Promise<
     sunLight,
     hemiLight,
     setAtmosphere,
+    setPhotoModeCamera,
+    updateTurntable,
     updateKeyboardPan,
   };
 }
