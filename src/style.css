@@ -54,6 +54,50 @@ body,
   will-change: transform, opacity;
 }
 
+.emote-bubble {
+  position: fixed;
+  top: 0;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 7px;
+  min-width: 26px;
+  height: 24px;
+  border-radius: 999px;
+  background: rgba(252, 246, 232, 0.92);
+  color: #2f2318;
+  border: 1.5px solid rgba(162, 128, 86, 0.55);
+  box-shadow: 0 4px 12px rgba(24, 16, 8, 0.28);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  will-change: transform, opacity;
+}
+
+.emote-bubble::after {
+  content: "";
+  position: absolute;
+  bottom: -5px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid rgba(252, 246, 232, 0.92);
+}
+
+.emote-bubble--wait {
+  background: rgba(255, 240, 212, 0.94);
+  border-color: rgba(224, 152, 64, 0.72);
+}
+
+.emote-bubble--wait::after {
+  border-top-color: rgba(255, 240, 212, 0.94);
+}
+
 #hud {
   position: fixed;
   inset: 0;
@@ -386,4 +430,27 @@ body,
 .roster-status {
   font-size: 10px;
   color: var(--text-muted);
+}
+
+.roster-trait {
+  font-size: 11px;
+  opacity: 0.9;
+}
+
+.trait-badge {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: rgba(240, 185, 73, 0.14);
+  border: 1px solid rgba(240, 185, 73, 0.35);
+  font-size: 12px;
+  color: var(--text-cream);
+}
+
+.trait-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.35;
 }

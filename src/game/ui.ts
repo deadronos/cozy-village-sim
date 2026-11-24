@@ -3,6 +3,7 @@ import type { VillageSimulation } from "./simulation.ts";
 import {
   BUILDING_DEFS,
   JOB_META,
+  TRAIT_META,
   type BuildingKind,
   type TimeOfDay,
   type ToolMode,
@@ -152,7 +153,7 @@ export class CozyHud {
       name: string;
       sub: string;
     }[] = [
-      { id: "path", icon: "🪨", name: "Cobble Path", sub: "+45% walk speed" },
+      { id: "path", icon: "🪨", name: "Cobble Path", sub: "Preferred · +45% spd" },
       { id: "farm", icon: "🌾", name: "Farmfield", sub: "Grows wheat" },
       { id: "meadow", icon: "🌼", name: "Meadow", sub: "+1 Coziness" },
       { id: "tree", icon: "🌲", name: "Plant Tree", sub: "Forest regrowth" },
@@ -176,9 +177,10 @@ export class CozyHud {
     const items = this.sim.villagers
       .map((v) => {
         const meta = JOB_META[v.job];
+        const trait = TRAIT_META[v.trait];
         return `
-          <div class="roster-item" data-villager="${v.id}">
-            <div><strong>${meta.icon} ${v.name}</strong> · ${meta.label}</div>
+          <div class="roster-item" data-villager="${v.id}" title="${trait.icon} ${trait.label}: ${trait.description}">
+            <div><strong>${meta.icon} ${v.name}</strong> · ${meta.label} <span class="roster-trait">${trait.icon}</span></div>
             <div class="roster-status">${v.statusText}</div>
           </div>
         `;
@@ -238,6 +240,7 @@ export class CozyHud {
       const v = this.sim.villagers.find((x) => x.id === this.sim.selectedVillagerId);
       if (!v) return "";
       const meta = JOB_META[v.job];
+      const trait = TRAIT_META[v.trait];
       return `
         <div class="inspector-card">
           <div class="inspector-header">
@@ -245,6 +248,10 @@ export class CozyHud {
             <button class="icon-btn" data-close-inspector="1">✕</button>
           </div>
           <div class="inspector-desc">Role: <strong>${meta.label}</strong></div>
+          <div class="trait-badge" title="${trait.description}">
+            <span>${trait.icon} <strong>${trait.label}</strong></span>
+            <span class="trait-desc">${trait.description}</span>
+          </div>
           <div class="inspector-desc" style="color:var(--text-cream)">${v.statusText}</div>
         </div>
       `;

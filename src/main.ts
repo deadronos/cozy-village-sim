@@ -91,6 +91,7 @@ async function bootstrap(): Promise<void> {
     },
     onTimeOfDayChange(tod) {
       ctx.setTimeOfDay(tod);
+      sim.timeOfDay = tod;
     },
     onFocusPosition(x, z) {
       const offset = ctx.camera.position.clone().sub(ctx.controls.target);
