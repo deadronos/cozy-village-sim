@@ -52,11 +52,12 @@ export function getTileMoveCost(
 ): number {
   if (!tile) return Infinity;
 
-  // Water is impassable unless a bridge or dock occupies it
-  const terrainName = tile.terrain as string;
-  if (terrainName === "bridge") {
+  // Wooden bridges over water are strongly preferred just like Cobble Paths!
+  if (tile.hasBridge) {
     return MIN_TILE_COST;
   }
+
+  // Water is impassable without a bridge
   if (tile.terrain === "water") {
     return Infinity;
   }

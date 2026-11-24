@@ -2,6 +2,7 @@ import * as THREE from "three";
 import type { AssetLibrary } from "./assets.ts";
 import type { CozyAudio } from "./audio.ts";
 import { findGridPath, gridPathToWorldWaypoints, type PathOptions } from "./pathfinding.ts";
+import { SAVE_SCHEMA_VERSION, type VillageSaveData } from "./storage.ts";
 import {
   BUILDING_DEFS,
   JOB_META,
@@ -13,6 +14,7 @@ import {
   type FloatingPopup,
   type GridTile,
   type ResourceBag,
+  type Season,
   type TimeOfDay,
   type VillagerInstance,
   type VillagerJob,
@@ -65,22 +67,37 @@ interface Particle {
   maxLife: number;
 }
 
+interface WeatherParticle {
+  mesh: THREE.Mesh;
+  vx: number;
+  vy: number;
+  vz: number;
+  phase: number;
+}
+
+const SEASON_CYCLE: readonly Season[] = ["spring", "summer", "autumn", "winter"];
+
 export class VillageSimulation {
   public resources: ResourceBag = {
     wood: 38,
     stone: 16,
     food: 20,
     tools: 1,
+    planks: 2,
+    bread: 0,
   };
 
   public buildings: BuildingInstance[] = [];
   public villagers: VillagerInstance[] = [];
   public speedMultiplier = 1;
   public timeOfDay: TimeOfDay = "morning";
+  public season: Season = "summer";
+  public autoSeason = false;
   public selectedBuildingId: string | null = null;
   public selectedVillagerId: string | null = null;
 
   public onStateChanged: (() => void) | null = null;
+  public onAtmosphereChanged: ((tod: TimeOfDay, season: Season) => void) | null = null;
 
   private scene: THREE.Scene;
   private world: IslandWorld;
@@ -94,9 +111,12 @@ export class VillageSimulation {
   private popups: FloatingPopup[] = [];
   private emotes: EmoteBubble[] = [];
   private particles: Particle[] = [];
+  private weatherParticles: WeatherParticle[] = [];
   private particleGeo = new THREE.BoxGeometry(0.12, 0.12, 0.12);
   private smokeTimer = 0;
   private housingEmoteTimer = 0;
+  private weatherSpawnTimer = 0;
+  private seasonCycleTimer = 0;
 
   constructor(
     scene: THREE.Scene,
@@ -168,6 +188,8 @@ export class VillageSimulation {
     for (const v of this.villagers) {
       if (v.trait === "chatty") score += 2;
     }
+    // Warm fresh bread adds cozy village morale
+    score += Math.min(this.resources.bread, 10);
     return score;
   }
 
@@ -175,12 +197,18 @@ export class VillageSimulation {
     return 1 + Math.min(this.resources.tools, 10) * 0.12;
   }
 
+  public getBreadSpeedBonus(): number {
+    return 1 + Math.min(this.resources.bread, 10) * 0.03;
+  }
+
   public canAfford(cost: Partial<ResourceBag>): boolean {
     return (
       (cost.wood ?? 0) <= this.resources.wood &&
       (cost.stone ?? 0) <= this.resources.stone &&
       (cost.food ?? 0) <= this.resources.food &&
-      (cost.tools ?? 0) <= this.resources.tools
+      (cost.tools ?? 0) <= this.resources.tools &&
+      (cost.planks ?? 0) <= this.resources.planks &&
+      (cost.bread ?? 0) <= this.resources.bread
     );
   }
 
@@ -189,6 +217,8 @@ export class VillageSimulation {
     this.resources.stone -= cost.stone ?? 0;
     this.resources.food -= cost.food ?? 0;
     this.resources.tools -= cost.tools ?? 0;
+    this.resources.planks -= cost.planks ?? 0;
+    this.resources.bread -= cost.bread ?? 0;
   }
 
   public canPlaceBuilding(
@@ -205,7 +235,11 @@ export class VillageSimulation {
       return { ok: false, reason: "Already built" };
     }
 
-    if (def.shoreOnly) {
+    if (def.waterOnly) {
+      if (tile.terrain !== "water") {
+        return { ok: false, reason: "Must be placed over water" };
+      }
+    } else if (def.shoreOnly) {
       if (tile.terrain !== "sand" || !this.world.isAdjacentToWater(gx, gz)) {
         return { ok: false, reason: "Must be placed on sandy shoreline" };
       }
@@ -254,17 +288,23 @@ export class VillageSimulation {
     gz: number,
     rotation: number,
     constructed: boolean,
+    skipAutoAssign = false,
   ): BuildingInstance {
     const id = `b_${this.nextId++}`;
     const tile = this.world.getTile(gx, gz);
     const pos = this.world.gridToWorld(gx, gz);
-    const y = tile?.elevation ?? 0;
+    const y = kind === "bridge" ? -0.2 : (tile?.elevation ?? 0);
 
     const { mesh, bladesMesh } = this.createBuildingVisual(kind, constructed);
     mesh.position.set(pos.x, y, pos.z);
     mesh.rotation.y = rotation * (Math.PI / 2);
     mesh.userData = { buildingId: id };
     this.scene.add(mesh);
+
+    let light: THREE.PointLight | undefined;
+    if (constructed && (kind === "lantern" || kind === "tavern" || kind === "town_hall")) {
+      light = this.attachBuildingLight(mesh, kind);
+    }
 
     const inst: BuildingInstance = {
       id,
@@ -277,19 +317,107 @@ export class VillageSimulation {
       level: 1,
       mesh,
       bladesMesh,
+      light,
       workerId: null,
       popAnim: 0,
     };
 
+    this.applyAtmosphereToBuilding(inst);
+
     if (tile) {
       tile.buildingId = id;
+      if (kind === "bridge" && constructed) {
+        tile.hasBridge = true;
+      }
     }
     this.buildings.push(inst);
 
-    if (constructed) {
+    if (constructed && !skipAutoAssign) {
       this.tryAssignWorker(inst);
     }
     return inst;
+  }
+
+  private attachBuildingLight(mesh: THREE.Object3D, kind: BuildingKind): THREE.PointLight {
+    const color = kind === "lantern" ? 0xffc66e : 0xffb357;
+    const distance = kind === "lantern" ? 7.5 : 9.0;
+    const light = new THREE.PointLight(color, 0, distance, 1.8);
+    light.position.set(kind === "lantern" ? 0.25 : 0, kind === "lantern" ? 1.1 : 1.5, 0);
+    mesh.add(light);
+    return light;
+  }
+
+  public setTimeOfDay(tod: TimeOfDay): void {
+    this.timeOfDay = tod;
+    for (const b of this.buildings) {
+      this.applyAtmosphereToBuilding(b);
+    }
+    this.onAtmosphereChanged?.(this.timeOfDay, this.season);
+  }
+
+  public setSeason(season: Season): void {
+    this.season = season;
+    this.world.setSeason(season);
+    for (const b of this.buildings) {
+      this.applyAtmosphereToBuilding(b);
+    }
+    this.onAtmosphereChanged?.(this.timeOfDay, this.season);
+    this.onStateChanged?.();
+  }
+
+  private applyAtmosphereToBuilding(b: BuildingInstance): void {
+    const isDusk = this.timeOfDay === "dusk";
+    const isGolden = this.timeOfDay === "golden";
+    const isWinter = this.season === "winter";
+
+    if (b.light) {
+      const targetIntensity = isDusk ? (b.kind === "lantern" ? 2.6 : 2.0) : isGolden ? 0.45 : 0.0;
+      b.light.intensity = targetIntensity;
+    }
+
+    b.mesh.traverse((child) => {
+      if (!(child instanceof THREE.Mesh)) return;
+      const mat = child.material as THREE.MeshStandardMaterial;
+      if (!mat) return;
+      const matName = (mat.name || "").toLowerCase();
+      const meshName = child.name.toLowerCase();
+
+      // Brighter warm windows, lanterns, and forge hearths at Dusk
+      if (
+        matName.includes("window_glow") ||
+        matName.includes("lantern_glow") ||
+        matName.includes("forge_glow") ||
+        meshName.includes("win_pane") ||
+        meshName.includes("lantern_glass")
+      ) {
+        if (!child.userData["glowCloned"]) {
+          child.material = mat.clone();
+          child.userData["glowCloned"] = true;
+        }
+        const m = child.material as THREE.MeshStandardMaterial;
+        m.emissiveIntensity = isDusk ? 2.6 : isGolden ? 1.3 : 0.65;
+      }
+
+      // Frosted snow-capped roofs in Winter
+      if (
+        meshName.includes("roof_body") ||
+        meshName.includes("cap_roof") ||
+        meshName.includes("cupola_roof")
+      ) {
+        if (!child.userData["roofOrigColor"]) {
+          child.material = mat.clone();
+          child.userData["roofOrigColor"] = (
+            child.material as THREE.MeshStandardMaterial
+          ).color.getHex();
+        }
+        const m = child.material as THREE.MeshStandardMaterial;
+        const orig = new THREE.Color(child.userData["roofOrigColor"] as number);
+        if (isWinter) {
+          orig.lerp(new THREE.Color(0xeef5fa), 0.62);
+        }
+        m.color.copy(orig);
+      }
+    });
   }
 
   private createBuildingVisual(
@@ -327,6 +455,14 @@ export class VillageSimulation {
     this.scene.add(mesh);
     b.mesh = mesh;
     b.bladesMesh = bladesMesh;
+    if (b.kind === "lantern" || b.kind === "tavern" || b.kind === "town_hall") {
+      b.light = this.attachBuildingLight(mesh, b.kind);
+    }
+    if (b.kind === "bridge") {
+      const tile = this.world.getTile(b.gx, b.gz);
+      if (tile) tile.hasBridge = true;
+    }
+    this.applyAtmosphereToBuilding(b);
 
     this.spawnParticles(pos.x, pos.y + 0.7, pos.z, 0xf6d56a, 10);
     this.spawnPopup(pos.x, pos.y + 1.8, pos.z, `${BUILDING_DEFS[b.kind].name} built!`, "#ffe484");
@@ -342,15 +478,22 @@ export class VillageSimulation {
     this.onStateChanged?.();
   }
 
-  public upgradeBuilding(buildingId: string): boolean {
-    const b = this.buildings.find((x) => x.id === buildingId);
-    if (!b || !b.constructed || b.level >= 3) return false;
-
-    const cost: Partial<ResourceBag> = {
-      wood: 6 * b.level,
+  public getUpgradeCost(b: BuildingInstance): Partial<ResourceBag> {
+    return {
+      wood: 4 * b.level,
+      planks: b.level >= 1 ? 2 * b.level : 0,
       stone: 3 * b.level,
       tools: b.level >= 2 ? 1 : 0,
     };
+  }
+
+  public upgradeBuilding(buildingId: string): boolean {
+    const b = this.buildings.find((x) => x.id === buildingId);
+    if (!b || !b.constructed || b.level >= 3) return false;
+    const def = BUILDING_DEFS[b.kind];
+    if (def.decor || def.walkable) return false;
+
+    const cost = this.getUpgradeCost(b);
     if (!this.canAfford(cost)) return false;
 
     this.spend(cost);
@@ -393,6 +536,7 @@ export class VillageSimulation {
 
       this.scene.remove(b.mesh);
       tile.buildingId = null;
+      tile.hasBridge = false;
       this.buildings.splice(idx, 1);
 
       // Remove associated villager
@@ -674,23 +818,40 @@ export class VillageSimulation {
       }
     }
 
-    // Gentle chimney smoke from cottages, town hall & smithy
+    // Gentle chimney smoke from cottages, town hall, smithy, bakery & tavern
     this.smokeTimer += simDt;
     if (this.smokeTimer > 0.65) {
       this.smokeTimer = 0;
       for (const b of this.buildings) {
         if (!b.constructed) continue;
-        if (b.kind === "cottage" || b.kind === "town_hall" || b.kind === "smithy") {
+        if (
+          b.kind === "cottage" ||
+          b.kind === "town_hall" ||
+          b.kind === "smithy" ||
+          b.kind === "bakery" ||
+          b.kind === "tavern"
+        ) {
           const isSmithy = b.kind === "smithy";
           this.spawnParticles(
-            b.mesh.position.x + (isSmithy ? -0.3 : 0.3),
-            b.mesh.position.y + (isSmithy ? 2.2 : 1.75),
+            b.mesh.position.x + (isSmithy ? -0.3 : 0.35),
+            b.mesh.position.y + (b.kind === "tavern" ? 2.45 : isSmithy ? 2.2 : 1.75),
             b.mesh.position.z - 0.2,
-            isSmithy ? 0xff9f59 : 0xf2f4f7,
+            isSmithy ? 0xff9f59 : b.kind === "bakery" ? 0xfff3dc : 0xf2f4f7,
             1,
             true,
           );
         }
+      }
+    }
+
+    // Optional slow automatic season cycle
+    if (this.autoSeason && simDt > 0) {
+      this.seasonCycleTimer += simDt;
+      if (this.seasonCycleTimer >= 65) {
+        this.seasonCycleTimer = 0;
+        const idx = SEASON_CYCLE.indexOf(this.season);
+        const nextSeason = SEASON_CYCLE[(idx + 1) % SEASON_CYCLE.length]!;
+        this.setSeason(nextSeason);
       }
     }
 
@@ -724,10 +885,77 @@ export class VillageSimulation {
       this.updateHousingWaitEmotes(simDt);
     }
 
-    // Update particles, floating popups & cozy emote bubbles
+    // Update particles, seasonal weather, floating popups & cozy emote bubbles
     this.updateParticles(dt);
+    this.updateWeatherParticles(dt, elapsed);
     this.updatePopups(dt, camera);
     this.updateEmotes(dt, camera);
+  }
+
+  private updateWeatherParticles(dt: number, elapsed: number): void {
+    const wantsWeather =
+      this.season === "winter" ||
+      this.season === "autumn" ||
+      this.season === "spring" ||
+      (this.season === "summer" && this.timeOfDay === "dusk");
+
+    if (wantsWeather) {
+      this.weatherSpawnTimer += dt;
+      const interval = this.season === "winter" ? 0.08 : this.season === "autumn" ? 0.16 : 0.22;
+      const maxCount = this.season === "winter" ? 90 : 48;
+      if (this.weatherSpawnTimer >= interval && this.weatherParticles.length < maxCount) {
+        this.weatherSpawnTimer = 0;
+        const isFirefly = this.season === "summer" && this.timeOfDay === "dusk";
+        const color =
+          this.season === "winter"
+            ? 0xf4f9ff
+            : this.season === "autumn"
+              ? Math.random() < 0.5
+                ? 0xe07b28
+                : 0xc94a24
+              : this.season === "spring"
+                ? Math.random() < 0.5
+                  ? 0xf9b8d0
+                  : 0xffe4ec
+                : 0xffe97a;
+        const mat = new THREE.MeshStandardMaterial({
+          color,
+          roughness: 0.7,
+          emissive: isFirefly ? 0xffdd55 : 0x000000,
+          emissiveIntensity: isFirefly ? 2.2 : 0,
+        });
+        const m = new THREE.Mesh(this.particleGeo, mat);
+        const s = this.season === "winter" ? 0.75 : isFirefly ? 0.55 : 0.85;
+        m.scale.set(s, s * 0.45, s);
+        m.position.set(
+          (Math.random() - 0.5) * 34,
+          isFirefly ? 0.8 + Math.random() * 2.4 : 11 + Math.random() * 4,
+          (Math.random() - 0.5) * 34,
+        );
+        this.scene.add(m);
+        this.weatherParticles.push({
+          mesh: m,
+          vx: isFirefly ? (Math.random() - 0.5) * 0.5 : 0.4 + Math.random() * 0.6,
+          vy: isFirefly ? 0.08 : -(0.9 + Math.random() * 0.7),
+          vz: isFirefly ? (Math.random() - 0.5) * 0.5 : 0.2 + Math.random() * 0.4,
+          phase: Math.random() * 6.28,
+        });
+      }
+    }
+
+    for (let i = this.weatherParticles.length - 1; i >= 0; i--) {
+      const wp = this.weatherParticles[i]!;
+      wp.mesh.position.x += (wp.vx + Math.sin(elapsed * 1.8 + wp.phase) * 0.35) * dt;
+      wp.mesh.position.y += wp.vy * dt;
+      wp.mesh.position.z += (wp.vz + Math.cos(elapsed * 1.5 + wp.phase) * 0.25) * dt;
+      wp.mesh.rotation.y += dt * 1.4;
+      wp.mesh.rotation.x += dt * 0.8;
+
+      if (wp.mesh.position.y < -0.2 || wp.mesh.position.y > 16 || !wantsWeather) {
+        this.scene.remove(wp.mesh);
+        this.weatherParticles.splice(i, 1);
+      }
+    }
   }
 
   private updateVillagerChats(dt: number): void {
@@ -795,6 +1023,7 @@ export class VillageSimulation {
     if (!home) return;
 
     const toolBoost = this.getToolSpeedBonus();
+    const breadBoost = this.getBreadSpeedBonus();
     const workTraitBoost = this.getVillagerWorkSpeed(v);
     const homeLevel = home.level;
 
@@ -809,13 +1038,14 @@ export class VillageSimulation {
         this.rerouteVillager(v, home);
       }
 
-      // Faster walking on cobblestone paths & for Fast Walker trait!
+      // Faster walking on cobblestone paths, bridges, Bread morale & Fast Walker trait!
       const currGrid = this.world.worldToGrid(v.x, v.z);
       const currTile = currGrid ? this.world.getTile(currGrid.gx, currGrid.gz) : null;
-      const baseElevation = currTile?.elevation ?? 0;
-      const pathBoost = currTile?.terrain === "path" ? 1.45 : 1.0;
+      const baseElevation = currTile?.hasBridge ? 0.14 : (currTile?.elevation ?? 0);
+      const onRoad = currTile?.terrain === "path" || Boolean(currTile?.hasBridge);
+      const pathBoost = onRoad ? 1.45 : 1.0;
       const traitWalkBoost = v.trait === "fast_walker" ? 1.25 : 1.0;
-      const speed = 2.4 * pathBoost * traitWalkBoost * (0.9 + toolBoost * 0.1);
+      const speed = 2.4 * pathBoost * traitWalkBoost * breadBoost * (0.9 + toolBoost * 0.1);
 
       const nextWp = v.path[0];
       const goalX = nextWp ? nextWp.x : v.targetX;
@@ -837,7 +1067,7 @@ export class VillageSimulation {
         // Reached final destination
         if (v.state === "moving") {
           v.state = "working";
-          v.workTimer = this.getWorkDuration(v.job) / (toolBoost * workTraitBoost);
+          v.workTimer = this.getWorkDuration(v.job) / (toolBoost * breadBoost * workTraitBoost);
         } else {
           // Arrived home -> deposit carried resources
           if (v.carrying && v.carryingAmount > 0) {
@@ -847,24 +1077,28 @@ export class VillageSimulation {
                 ? "🪵"
                 : v.carrying === "stone"
                   ? "🪨"
-                  : v.carrying === "food"
-                    ? v.job === "fisherman"
-                      ? "🐟"
-                      : "🌾"
-                    : "⚒️";
+                  : v.carrying === "planks"
+                    ? "🪚"
+                    : v.carrying === "bread"
+                      ? "🥐"
+                      : v.carrying === "food"
+                        ? v.job === "fisherman"
+                          ? "🐟"
+                          : "🌾"
+                        : "⚒️";
             this.spawnPopup(
               v.x,
               baseElevation + 1.3,
               v.z,
               `+${v.carryingAmount} ${icon}`,
-              v.carrying === "tools" ? "#ffd166" : "#b8f5a8",
+              v.carrying === "tools" || v.carrying === "bread" ? "#ffd166" : "#b8f5a8",
             );
             this.spawnEmote({
               villagerId: v.id,
               x: v.x,
               y: baseElevation + 1.45,
               z: v.z,
-              icon: v.carrying === "tools" ? "⚒️" : "✨",
+              icon: v.carrying === "tools" ? "⚒️" : v.carrying === "bread" ? "🥐" : "✨",
               duration: 1.8,
             });
             this.audio.playHarvest();
@@ -950,10 +1184,46 @@ export class VillageSimulation {
         return 4.5;
       case "builder":
         return 2.0;
+      case "baker":
+        return 3.6;
+      case "sawyer":
+        return 3.4;
+      case "miner":
+        return 3.8;
     }
   }
 
   private pickTaskForVillager(v: VillagerInstance, home: BuildingInstance, dt: number): void {
+    // Cozy Dusk Nightlife: villagers occasionally stroll toward the Tavern, Cottages, or Town Hall square
+    if (this.timeOfDay === "dusk" && !v.carrying && Math.random() < 0.32) {
+      const socialHub =
+        this.buildings.find((b) => b.kind === "tavern" && b.constructed) ??
+        this.buildings.find((b) => b.kind === "cottage" && b.constructed) ??
+        this.buildings.find((b) => b.kind === "town_hall" && b.constructed);
+      if (socialHub) {
+        v.targetBuildingId = null;
+        v.targetTile = null;
+        this.setVillagerDestination(v, socialHub.gx, socialHub.gz, { goalAdjacent: true });
+        v.state = "moving";
+        v.workTimer = 2.6;
+        v.statusText =
+          socialHub.kind === "tavern"
+            ? "Unwinding at the Cozy Tavern"
+            : socialHub.kind === "cottage"
+              ? "Strolling home for the evening"
+              : "Evening stroll in the town square";
+        this.spawnEmote({
+          villagerId: v.id,
+          x: v.x,
+          y: v.mesh.position.y + 1.35,
+          z: v.z,
+          icon: socialHub.kind === "tavern" ? "🍺" : "🏮",
+          duration: 2.2,
+        });
+        return;
+      }
+    }
+
     if (v.job === "builder") {
       // Find nearest unconstructed building
       const site = this.buildings.find((b) => !b.constructed);
@@ -1048,6 +1318,34 @@ export class VillageSimulation {
         v.state = "moving";
         v.statusText = "Forging tools at the anvil";
       }
+      return;
+    }
+
+    if (v.job === "baker") {
+      v.targetTile = null;
+      v.targetBuildingId = null;
+      this.setVillagerDestination(v, home.gx, home.gz, { goalAdjacent: true });
+      v.state = "moving";
+      v.statusText = this.resources.food >= 2 ? "Baking warm loaves" : "Kneading hearth dough";
+      return;
+    }
+
+    if (v.job === "sawyer") {
+      v.targetTile = null;
+      v.targetBuildingId = null;
+      this.setVillagerDestination(v, home.gx, home.gz, { goalAdjacent: true });
+      v.state = "moving";
+      v.statusText =
+        this.resources.wood >= 2 ? "Sawing timber into planks" : "Trimming scrap planks";
+      return;
+    }
+
+    if (v.job === "miner") {
+      v.targetTile = null;
+      v.targetBuildingId = null;
+      this.setVillagerDestination(v, home.gx, home.gz, { goalAdjacent: true });
+      v.state = "moving";
+      v.statusText = "Quarrying fresh stone blocks";
     }
   }
 
@@ -1168,6 +1466,48 @@ export class VillageSimulation {
       }
       this.setVillagerDestination(v, home.gx, home.gz, { goalAdjacent: true });
       v.state = "returning";
+      return;
+    }
+
+    if (v.job === "baker") {
+      if (this.resources.food >= 2) {
+        this.resources.food -= 2;
+        v.carrying = "bread";
+        v.carryingAmount = 2 + bonus;
+      } else {
+        v.carrying = "bread";
+        v.carryingAmount = 1;
+      }
+      this.spawnParticles(v.x, 0.7, v.z, 0xf7d288, 5);
+      this.setVillagerDestination(v, home.gx, home.gz, { goalAdjacent: true });
+      v.state = "returning";
+      v.statusText = "Fresh bread from the oven!";
+      return;
+    }
+
+    if (v.job === "sawyer") {
+      if (this.resources.wood >= 2) {
+        this.resources.wood -= 2;
+        v.carrying = "planks";
+        v.carryingAmount = 2 + bonus;
+      } else {
+        v.carrying = "planks";
+        v.carryingAmount = 1;
+      }
+      this.spawnParticles(v.x, 0.6, v.z, 0xd8a86a, 5);
+      this.setVillagerDestination(v, home.gx, home.gz, { goalAdjacent: true });
+      v.state = "returning";
+      v.statusText = "Stacking finished planks";
+      return;
+    }
+
+    if (v.job === "miner") {
+      v.carrying = "stone";
+      v.carryingAmount = 3 + bonus;
+      this.spawnParticles(v.x, 0.6, v.z, 0x9aa0a8, 6);
+      this.setVillagerDestination(v, home.gx, home.gz, { goalAdjacent: true });
+      v.state = "returning";
+      v.statusText = "Hauling quarried stone";
       return;
     }
 
@@ -1358,5 +1698,202 @@ export class VillageSimulation {
       e.el.style.transform = `translate(${sx}px, ${sy}px) translate(-50%, -100%) scale(${scale.toFixed(2)})`;
       e.el.style.opacity = `${Math.max(0, Math.min(popIn, fadeOut))}`;
     }
+  }
+
+  public exportSaveData(): VillageSaveData {
+    const terrainOverrides: VillageSaveData["terrainOverrides"] = [];
+    const propOverrides: VillageSaveData["propOverrides"] = [];
+
+    for (let gz = 0; gz < MAP_SIZE; gz++) {
+      for (let gx = 0; gx < MAP_SIZE; gx++) {
+        const t = this.world.getTile(gx, gz);
+        if (!t || t.terrain === "water" || t.terrain === "sand") continue;
+        if (t.terrain !== "grass") {
+          terrainOverrides.push({
+            gx,
+            gz,
+            terrain: t.terrain,
+            cropStage: t.terrain === "farm" ? Number(t.cropStage.toFixed(2)) : undefined,
+          });
+        }
+        propOverrides.push({ gx, gz, prop: t.prop });
+      }
+    }
+
+    const buildings: VillageSaveData["buildings"] = this.buildings.map((b) => ({
+      kind: b.kind,
+      gx: b.gx,
+      gz: b.gz,
+      rotation: b.rotation,
+      constructed: b.constructed,
+      buildProgress: Number(b.buildProgress.toFixed(2)),
+      level: b.level,
+    }));
+
+    const villagers: VillageSaveData["villagers"] = [];
+    for (const v of this.villagers) {
+      const home = this.buildings.find((b) => b.id === v.homeBuildingId);
+      if (!home) continue;
+      villagers.push({
+        name: v.name,
+        trait: v.trait,
+        job: v.job,
+        homeGx: home.gx,
+        homeGz: home.gz,
+      });
+    }
+
+    return {
+      schemaVersion: SAVE_SCHEMA_VERSION,
+      savedAt: new Date().toISOString(),
+      timeOfDay: this.timeOfDay,
+      season: this.season,
+      autoSeason: this.autoSeason,
+      resources: { ...this.resources },
+      terrainOverrides,
+      propOverrides,
+      buildings,
+      villagers,
+    };
+  }
+
+  private clearAllEntities(): void {
+    for (const b of this.buildings) {
+      this.scene.remove(b.mesh);
+    }
+    this.buildings = [];
+    for (const v of this.villagers) {
+      this.scene.remove(v.mesh);
+    }
+    this.villagers = [];
+    for (const e of this.emotes) {
+      e.el.remove();
+    }
+    this.emotes = [];
+    for (const p of this.popups) {
+      p.el.remove();
+    }
+    this.popups = [];
+    this.selectedBuildingId = null;
+    this.selectedVillagerId = null;
+  }
+
+  public resetToStarterVillage(): void {
+    this.clearAllEntities();
+    this.world.resetIsland();
+    this.resources = { wood: 38, stone: 16, food: 20, tools: 1, planks: 2, bread: 0 };
+    this.timeOfDay = "morning";
+    this.season = "summer";
+    this.autoSeason = false;
+    this.world.setSeason(this.season);
+    this.setupStarterVillage();
+    this.navVersion++;
+    this.onAtmosphereChanged?.(this.timeOfDay, this.season);
+    this.onStateChanged?.();
+  }
+
+  public loadSaveData(data: VillageSaveData): void {
+    this.clearAllEntities();
+    this.world.resetIsland();
+
+    this.resources = { ...data.resources };
+    this.timeOfDay = data.timeOfDay;
+    this.season = data.season;
+    this.autoSeason = data.autoSeason;
+    this.world.setSeason(this.season);
+
+    // Reset all land tiles to plain grass before applying saved overrides
+    for (let gz = 0; gz < MAP_SIZE; gz++) {
+      for (let gx = 0; gx < MAP_SIZE; gx++) {
+        const t = this.world.getTile(gx, gz);
+        if (!t || t.terrain === "water" || t.terrain === "sand") continue;
+        if (t.terrain !== "grass") {
+          this.world.setTileTerrain(gx, gz, "grass");
+        }
+        if (data.propOverrides.length > 0 && t.prop !== null) {
+          this.world.setTileProp(gx, gz, null);
+        }
+      }
+    }
+
+    for (const ov of data.terrainOverrides) {
+      const t = this.world.getTile(ov.gx, ov.gz);
+      if (!t || t.terrain === "water" || t.terrain === "sand") continue;
+      this.world.setTileTerrain(ov.gx, ov.gz, ov.terrain);
+      if (ov.terrain === "farm" && typeof ov.cropStage === "number") {
+        t.cropStage = ov.cropStage;
+        this.world.updateCropVisual(t);
+      }
+    }
+
+    for (const po of data.propOverrides) {
+      const t = this.world.getTile(po.gx, po.gz);
+      if (!t || t.terrain === "water") continue;
+      this.world.setTileProp(po.gx, po.gz, po.prop);
+    }
+
+    const buildingByCoord = new Map<string, BuildingInstance>();
+    for (const sb of data.buildings) {
+      const inst = this.spawnBuilding(sb.kind, sb.gx, sb.gz, sb.rotation, sb.constructed, true);
+      inst.buildProgress = sb.buildProgress;
+      inst.level = sb.level;
+      buildingByCoord.set(`${sb.gx},${sb.gz}`, inst);
+    }
+
+    // Restore saved villagers with their exact names & traits
+    for (const sv of data.villagers) {
+      const home = buildingByCoord.get(`${sv.homeGx},${sv.homeGz}`);
+      if (!home || !home.constructed || home.workerId) continue;
+      const id = `v_${this.nextId++}`;
+      const { group, toolMesh } = this.assets.createVillagerMesh(sv.job);
+      const spawnTile = this.findWalkableAdjacentTile(home.gx, home.gz) ?? {
+        gx: home.gx,
+        gz: home.gz,
+      };
+      const spawnPos = this.world.gridToWorld(spawnTile.gx, spawnTile.gz);
+      const tileElev = this.world.getTile(spawnTile.gx, spawnTile.gz)?.elevation ?? 0;
+      group.position.set(spawnPos.x, tileElev, spawnPos.z);
+      group.userData = { villagerId: id };
+      this.scene.add(group);
+
+      const villager: VillagerInstance = {
+        id,
+        name: sv.name,
+        trait: sv.trait,
+        job: sv.job,
+        homeBuildingId: home.id,
+        x: spawnPos.x,
+        z: spawnPos.z,
+        targetX: spawnPos.x,
+        targetZ: spawnPos.z,
+        path: [],
+        pathNavVersion: this.navVersion,
+        state: "idle",
+        statusText: `Ready as ${JOB_META[sv.job].label}`,
+        workTimer: 0,
+        targetTile: null,
+        targetBuildingId: null,
+        carrying: null,
+        carryingAmount: 0,
+        mesh: group,
+        toolMesh,
+        walkPhase: Math.random() * 6.28,
+        chatCooldown: 5 + Math.random() * 6,
+        waitEmoteTimer: 3 + Math.random() * 4,
+      };
+      home.workerId = id;
+      this.villagers.push(villager);
+    }
+
+    // Fill any constructed workplaces that still need a worker and have housing
+    for (const b of this.buildings) {
+      if (b.constructed && !b.workerId) {
+        this.tryAssignWorker(b);
+      }
+    }
+
+    this.navVersion++;
+    this.onAtmosphereChanged?.(this.timeOfDay, this.season);
+    this.onStateChanged?.();
   }
 }

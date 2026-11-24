@@ -58,6 +58,10 @@ PALETTE = {
     "tunic_default": (0.34, 0.58, 0.76),
     "window_glow": (1.0, 0.82, 0.42),
     "forge_glow": (1.0, 0.42, 0.08),
+    "lantern_glow": (1.0, 0.86, 0.46),
+    "bread_crust": (0.82, 0.54, 0.24),
+    "awning_red": (0.78, 0.26, 0.24),
+    "awning_cream": (0.96, 0.91, 0.80),
     "rope": (0.76, 0.64, 0.42),
 }
 
@@ -707,6 +711,166 @@ def build_villager():
     return parts
 
 
+def build_bakery():
+    parts = []
+    parts.extend(build_modular_house_shell(1.26, 1.16, 0.82, 0.70, roof_mat="roof_terracotta", ox=-0.06, oy=0.06))
+    # Brick bread oven dome & tall chimney on the right side
+    parts.append(add_box("oven_base", (0.48, 0.50, 0.54), (0.64, 0.14, 0.27), mat_name="brick", bevel=0.02))
+    parts.append(add_icosphere("oven_dome", 0.26, subdivisions=1, scale=(1.0, 1.0, 0.72), loc=(0.64, 0.14, 0.56), mat_name="brick_dark"))
+    parts.append(add_box("oven_glow", (0.18, 0.08, 0.18), (0.64, -0.10, 0.34), mat_name="forge_glow", roughness=0.2, emission=1.8))
+    parts.extend(build_chimney(0.58, 0.24, 0.70, 0.95))
+    # Striped cozy awning over front bread stall
+    for i in range(4):
+        mat = "awning_red" if i % 2 == 0 else "awning_cream"
+        parts.append(add_box(f"awning_{i}", (0.24, 0.42, 0.05), (-0.42 + i * 0.24, -0.72, 0.74), (0.26, 0, 0), mat))
+    # Bread counter & golden loaves
+    parts.append(add_box("counter", (0.78, 0.24, 0.34), (-0.06, -0.74, 0.17), mat_name="timber_mid"))
+    for lx in (-0.28, -0.06, 0.16):
+        parts.append(add_icosphere("loaf", 0.09, subdivisions=1, scale=(1.2, 0.85, 0.75), loc=(lx, -0.74, 0.38), mat_name="bread_crust"))
+    return parts
+
+
+def build_sawmill():
+    parts = []
+    parts.extend(build_stone_foundation(1.48, 1.30, 0.18))
+    # Open timber workshop posts
+    for sx in (-0.60, 0.60):
+        for sy in (-0.50, 0.50):
+            parts.append(add_box("post", (0.11, 0.11, 0.88), (sx, sy, 0.62), mat_name="timber_dark"))
+    parts.extend(build_pitched_roof(1.58, 1.38, 0.56, 0.0, 0.0, 1.04, mat_name="roof_moss"))
+    # Sawbench & circular iron saw blade
+    parts.append(add_box("saw_table", (0.86, 0.38, 0.36), (-0.08, -0.06, 0.36), mat_name="timber_mid"))
+    parts.append(add_cylinder("saw_blade", 0.24, 0.24, 0.03, segments=12, loc=(-0.08, -0.06, 0.58), rot=(math.pi / 2, 0, 0), mat_name="iron", roughness=0.3, metallic=0.85))
+    # Stacked freshly sawn planks & raw logs
+    for i in range(4):
+        parts.append(add_box(f"plank_stack_{i}", (0.76, 0.22, 0.06), (0.18, 0.34, 0.22 + i * 0.07), (0, 0, 0.05), "timber_light"))
+    for i in range(2):
+        parts.append(add_cylinder(f"raw_log_{i}", 0.09, 0.09, 0.68, segments=7, loc=(-0.38 + i * 0.20, -0.58, 0.25), rot=(0, math.pi / 2, 0.15), mat_name="timber_dark"))
+    return parts
+
+
+def build_quarry():
+    parts = []
+    # Rocky quarry pit base
+    parts.append(add_box("quarry_pad", (1.52, 1.42, 0.16), (0, 0, 0.08), mat_name="stone_dark", bevel=0.02))
+    # Back rock wall & ore veins
+    parts.append(add_icosphere("cliff_l", 0.52, subdivisions=1, scale=(1.2, 0.9, 1.05), loc=(-0.36, 0.36, 0.44), mat_name="stone", jitter=0.06, seed=71))
+    parts.append(add_icosphere("cliff_r", 0.44, subdivisions=1, scale=(1.1, 0.9, 0.95), loc=(0.34, 0.38, 0.38), mat_name="stone_dark", jitter=0.05, seed=72))
+    for i, (x, y, z) in enumerate([(-0.22, 0.12, 0.52), (0.28, 0.16, 0.44), (-0.42, 0.22, 0.72)]):
+        parts.append(add_box(f"ore_{i}", (0.12, 0.12, 0.12), (x, y, z), (0.3, 0.4, i), "ore_gold", roughness=0.35, metallic=0.65))
+    # Wooden derrick crane hoisting a cut stone block
+    parts.append(add_box("crane_mast", (0.12, 0.12, 1.32), (0.48, -0.34, 0.74), mat_name="timber_dark"))
+    parts.append(add_box("crane_arm", (0.88, 0.09, 0.09), (0.14, -0.34, 1.24), (0, -0.25, 0), "timber_mid"))
+    parts.append(add_cylinder("crane_rope", 0.02, 0.02, 0.58, segments=5, loc=(-0.22, -0.34, 0.88), mat_name="rope"))
+    parts.append(add_box("hoist_block", (0.28, 0.28, 0.24), (-0.22, -0.34, 0.50), mat_name="stone_light", bevel=0.015))
+    # Cut stone blocks stacked neatly
+    parts.append(add_box("cut_stone_1", (0.32, 0.28, 0.24), (-0.42, -0.38, 0.28), mat_name="stone_light", bevel=0.015))
+    parts.append(add_box("cut_stone_2", (0.28, 0.26, 0.22), (0.16, -0.44, 0.27), mat_name="stone", bevel=0.015))
+    return parts
+
+
+def build_tavern():
+    parts = []
+    # Grand cozy two-story inn
+    parts.extend(build_stone_foundation(1.62, 1.42, 0.24))
+    z0 = 0.24
+    # Ground floor walls
+    parts.extend(build_timber_wall_segment(1.50, 0.82, 0.12, (0, -0.66, z0), 0.0, style="door"))
+    parts.extend(build_timber_wall_segment(1.50, 0.82, 0.12, (0, 0.66, z0), math.pi, style="window"))
+    parts.extend(build_timber_wall_segment(1.32, 0.82, 0.12, (-0.75, 0, z0), math.pi / 2, style="window"))
+    parts.extend(build_timber_wall_segment(1.32, 0.82, 0.12, (0.75, 0, z0), -math.pi / 2, style="window"))
+    # Slightly cantilevered second story (classic half-timbered inn!)
+    z1 = z0 + 0.80
+    parts.extend(build_timber_wall_segment(1.62, 0.68, 0.12, (0, -0.72, z1), 0.0, style="window"))
+    parts.extend(build_timber_wall_segment(1.62, 0.68, 0.12, (0, 0.72, z1), math.pi, style="window"))
+    parts.extend(build_timber_wall_segment(1.44, 0.68, 0.12, (-0.81, 0, z1), math.pi / 2, style="window"))
+    parts.extend(build_timber_wall_segment(1.44, 0.68, 0.12, (0.81, 0, z1), -math.pi / 2, style="plain"))
+    # Steep cozy roof + tall stone chimney
+    parts.extend(build_pitched_roof(1.84, 1.66, 0.82, 0.0, 0.0, z1 + 0.66, mat_name="roof_slate"))
+    parts.extend(build_chimney(0.46, 0.36, z1 + 0.88, 0.76))
+    # Hanging wooden tavern sign & ale barrels
+    parts.append(add_box("sign_post", (0.07, 0.07, 0.68), (0.64, -0.86, 0.34), mat_name="timber_dark"))
+    parts.append(add_box("sign_arm", (0.34, 0.05, 0.05), (0.50, -0.86, 0.64), mat_name="timber_dark"))
+    parts.append(add_box("sign_board", (0.28, 0.04, 0.22), (0.46, -0.86, 0.48), mat_name="ore_gold"))
+    parts.append(add_cylinder("barrel_1", 0.13, 0.11, 0.30, segments=8, loc=(-0.56, -0.84, 0.15), mat_name="timber_mid"))
+    parts.append(add_cylinder("barrel_2", 0.12, 0.10, 0.26, segments=8, loc=(-0.34, -0.84, 0.13), mat_name="timber_dark"))
+    return parts
+
+
+def build_bridge():
+    """Arched wooden footbridge spanning a full 2.0-unit water tile."""
+    parts = []
+    # Four sturdy timber pilings reaching into the water
+    for px in (-0.82, 0.82):
+        for py in (-0.54, 0.54):
+            parts.append(add_cylinder("piling", 0.09, 0.08, 0.96, segments=6, loc=(px, py, -0.14), mat_name="timber_dark"))
+    # Gently arched bridge planks spanning X = -1.0 .. +1.0
+    num_planks = 9
+    for i in range(num_planks):
+        t = (i / (num_planks - 1)) * 2.0 - 1.0  # -1..1
+        x = t * 0.90
+        arch_z = 0.28 + (1.0 - t * t) * 0.14
+        tilt_y = t * 0.16
+        mat = "timber_mid" if i % 2 == 0 else "timber_light"
+        parts.append(add_box(f"bridge_plank_{i}", (0.21, 1.16, 0.07), (x, 0, arch_z), (0, tilt_y, 0), mat))
+    # Side railing posts & handrails
+    for sy in (-0.56, 0.56):
+        for px in (-0.82, 0.0, 0.82):
+            t = px / 0.90
+            base_z = 0.28 + (1.0 - t * t) * 0.14
+            parts.append(add_box("rail_post", (0.08, 0.08, 0.48), (px, sy, base_z + 0.24), mat_name="timber_dark"))
+        parts.append(add_box("rail_top", (1.76, 0.06, 0.07), (0, sy, 0.82), mat_name="timber_mid"))
+        parts.append(add_box("rail_mid", (1.76, 0.05, 0.05), (0, sy, 0.62), mat_name="timber_light"))
+    return parts
+
+
+def build_stone_wall():
+    parts = []
+    parts.append(add_box("wall_base", (1.56, 0.34, 0.46), (0, 0, 0.23), mat_name="stone", bevel=0.03))
+    parts.append(add_box("wall_cap", (1.64, 0.40, 0.09), (0, 0, 0.49), mat_name="stone_light", bevel=0.02))
+    for px in (-0.68, 0.68):
+        parts.append(add_box("wall_pillar", (0.34, 0.42, 0.62), (px, 0, 0.31), mat_name="stone_dark", bevel=0.02))
+    return parts
+
+
+def build_lantern():
+    parts = []
+    parts.append(add_box("lantern_base", (0.26, 0.26, 0.14), (0, 0, 0.07), mat_name="stone", bevel=0.02))
+    parts.append(add_cylinder("lantern_post", 0.06, 0.05, 1.18, segments=6, loc=(0, 0, 0.68), mat_name="timber_dark"))
+    parts.append(add_box("lantern_arm", (0.34, 0.05, 0.05), (0.14, 0, 1.24), mat_name="iron", metallic=0.7))
+    parts.append(add_box("lantern_cap", (0.20, 0.20, 0.06), (0.26, 0, 1.18), mat_name="iron", metallic=0.7))
+    parts.append(add_box("lantern_glass", (0.14, 0.14, 0.20), (0.26, 0, 1.05), mat_name="lantern_glow", roughness=0.2, emission=2.0))
+    parts.append(add_box("lantern_bot", (0.18, 0.18, 0.04), (0.26, 0, 0.94), mat_name="iron", metallic=0.7))
+    return parts
+
+
+def build_flower_box():
+    parts = []
+    parts.append(add_box("box_body", (1.10, 0.44, 0.32), (0, 0, 0.16), mat_name="timber_mid", bevel=0.02))
+    parts.append(add_box("box_soil", (0.98, 0.34, 0.06), (0, 0, 0.31), mat_name="timber_dark"))
+    colors = ["flower_pink", "flower_yellow", "flower_blue", "flower_pink", "flower_yellow"]
+    for i, col in enumerate(colors):
+        fx = -0.38 + i * 0.19
+        fy = 0.06 if i % 2 == 0 else -0.06
+        parts.append(add_icosphere(f"bush_{i}", 0.12, subdivisions=1, scale=(1.1, 1.0, 0.8), loc=(fx, fy, 0.39), mat_name="grass_1"))
+        parts.append(add_icosphere(f"bloom_{i}", 0.075, subdivisions=1, loc=(fx, fy, 0.49), mat_name=col))
+    return parts
+
+
+def build_bench():
+    parts = []
+    # Seat & backrest slats
+    parts.append(add_box("seat", (1.08, 0.36, 0.06), (0, 0, 0.30), mat_name="timber_light", bevel=0.01))
+    parts.append(add_box("back_1", (1.08, 0.05, 0.12), (0, 0.17, 0.48), (-0.18, 0, 0), "timber_mid", bevel=0.01))
+    parts.append(add_box("back_2", (1.08, 0.05, 0.12), (0, 0.20, 0.62), (-0.18, 0, 0), "timber_mid", bevel=0.01))
+    # Iron side frames / legs
+    for sx in (-0.44, 0.44):
+        parts.append(add_box("leg_f", (0.06, 0.06, 0.30), (sx, -0.14, 0.15), mat_name="iron", metallic=0.6))
+        parts.append(add_box("leg_b", (0.06, 0.06, 0.66), (sx, 0.15, 0.33), mat_name="iron", metallic=0.6))
+        parts.append(add_box("arm", (0.06, 0.34, 0.05), (sx, 0.0, 0.44), mat_name="timber_dark"))
+    return parts
+
+
 def export_all_models():
     model_builders = {
         "town_hall": build_town_hall,
@@ -719,6 +883,15 @@ def export_all_models():
         "well": build_well,
         "windmill_base": build_windmill_base,
         "windmill_blades": build_windmill_blades,
+        "bakery": build_bakery,
+        "sawmill": build_sawmill,
+        "quarry": build_quarry,
+        "tavern": build_tavern,
+        "bridge": build_bridge,
+        "stone_wall": build_stone_wall,
+        "lantern": build_lantern,
+        "flower_box": build_flower_box,
+        "bench": build_bench,
         "scaffold": build_scaffold,
         "villager": build_villager,
     }

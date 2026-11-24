@@ -13,9 +13,27 @@ export type BuildingKind =
   | "smithy"
   | "builder_yard"
   | "well"
-  | "windmill";
+  | "windmill"
+  | "bakery"
+  | "sawmill"
+  | "quarry"
+  | "tavern"
+  | "bridge"
+  | "wood_fence"
+  | "stone_wall"
+  | "lantern"
+  | "flower_box"
+  | "bench";
 
-export type VillagerJob = "builder" | "lumberjack" | "farmer" | "fisherman" | "smith";
+export type VillagerJob =
+  | "builder"
+  | "lumberjack"
+  | "farmer"
+  | "fisherman"
+  | "smith"
+  | "baker"
+  | "sawyer"
+  | "miner";
 
 export type VillagerTraitId =
   | "early_bird"
@@ -43,11 +61,15 @@ export type ToolMode =
 
 export type TimeOfDay = "morning" | "golden" | "dusk";
 
+export type Season = "spring" | "summer" | "autumn" | "winter";
+
 export interface ResourceBag {
   wood: number;
   stone: number;
   food: number;
   tools: number;
+  planks: number;
+  bread: number;
 }
 
 export interface BuildingDefinition {
@@ -61,6 +83,9 @@ export interface BuildingDefinition {
   housing?: number;
   coziness: number;
   shoreOnly?: boolean;
+  waterOnly?: boolean;
+  decor?: boolean;
+  walkable?: boolean;
   unique?: boolean;
 }
 
@@ -74,6 +99,7 @@ export interface GridTile {
   decorMesh: THREE.Object3D | null;
   cropStage: number; // 0..1 for farmfields
   buildingId: string | null;
+  hasBridge?: boolean;
   regrowTimer: number;
 }
 
@@ -88,6 +114,7 @@ export interface BuildingInstance {
   level: number;
   mesh: THREE.Object3D;
   bladesMesh?: THREE.Object3D;
+  light?: THREE.PointLight;
   workerId: string | null;
   popAnim: number; // 0..1 squash-stretch pop-in
 }
@@ -232,9 +259,110 @@ export const BUILDING_DEFS: Record<BuildingKind, BuildingDefinition> = {
     name: "Windmill",
     icon: "🌬️",
     description: "Spinning landmark that doubles nearby farm harvests.",
-    cost: { wood: 14, stone: 8, tools: 1 },
+    cost: { wood: 10, planks: 4, stone: 8, tools: 1 },
     buildTime: 6.5,
     coziness: 14,
+  },
+  bakery: {
+    kind: "bakery",
+    name: "Bakery",
+    icon: "🥐",
+    description: "Turns Food into warm Bread (+walk & work speed and Coziness!).",
+    cost: { wood: 10, stone: 6 },
+    buildTime: 4.5,
+    job: "baker",
+    coziness: 7,
+  },
+  sawmill: {
+    kind: "sawmill",
+    name: "Sawmill",
+    icon: "🪚",
+    description: "Refines Wood into Planks for Level 2–3 upgrades & landmarks.",
+    cost: { wood: 8, stone: 4 },
+    buildTime: 4.0,
+    job: "sawyer",
+    coziness: 3,
+  },
+  quarry: {
+    kind: "quarry",
+    name: "Stone Quarry",
+    icon: "⛏️",
+    description: "Dedicated Miner extracts steady Stone & Ore for your village.",
+    cost: { wood: 10, stone: 4 },
+    buildTime: 4.5,
+    job: "miner",
+    coziness: 2,
+  },
+  tavern: {
+    kind: "tavern",
+    name: "Cozy Tavern",
+    icon: "🍺",
+    description: "Social hub & inn (+2 pop, huge Coziness, dusk gathering spot!).",
+    cost: { wood: 12, planks: 4, stone: 8 },
+    buildTime: 6.0,
+    housing: 2,
+    coziness: 18,
+  },
+  bridge: {
+    kind: "bridge",
+    name: "Wooden Bridge",
+    icon: "🌉",
+    description: "Place over water tiles to connect coves. Villagers love bridges!",
+    cost: { wood: 4 },
+    buildTime: 0,
+    coziness: 3,
+    waterOnly: true,
+    walkable: true,
+  },
+  wood_fence: {
+    kind: "wood_fence",
+    name: "Wood Fence",
+    icon: "🪵",
+    description: "Charming wooden pasture fence (+2 Coziness). Press R to rotate.",
+    cost: { wood: 1 },
+    buildTime: 0,
+    coziness: 2,
+    decor: true,
+  },
+  stone_wall: {
+    kind: "stone_wall",
+    name: "Stone Wall",
+    icon: "🧱",
+    description: "Low cobblestone garden wall (+2 Coziness). Press R to rotate.",
+    cost: { stone: 2 },
+    buildTime: 0,
+    coziness: 2,
+    decor: true,
+  },
+  lantern: {
+    kind: "lantern",
+    name: "Street Lantern",
+    icon: "🏮",
+    description: "Warm glowing lamp post that lights up paths at Dusk (+4 Coziness).",
+    cost: { wood: 2, stone: 1 },
+    buildTime: 0,
+    coziness: 4,
+    decor: true,
+  },
+  flower_box: {
+    kind: "flower_box",
+    name: "Flower Box",
+    icon: "🌺",
+    description: "Wooden planter bursting with village blooms (+3 Coziness).",
+    cost: { wood: 2 },
+    buildTime: 0,
+    coziness: 3,
+    decor: true,
+  },
+  bench: {
+    kind: "bench",
+    name: "Park Bench",
+    icon: "🪑",
+    description: "Cozy wooden bench for evening rests (+3 Coziness).",
+    cost: { wood: 2 },
+    buildTime: 0,
+    coziness: 3,
+    decor: true,
   },
 };
 
@@ -247,6 +375,16 @@ export const JOB_META: Record<
   farmer: { label: "Farmer", icon: "🌾", tunicColor: 0x4f8a4b, hatColor: 0xe6c35c },
   fisherman: { label: "Fisherman", icon: "🎣", tunicColor: 0x3b7aa8, hatColor: 0x264e70 },
   smith: { label: "Smith", icon: "⚒️", tunicColor: 0x454955, hatColor: 0x2b2d34 },
+  baker: { label: "Baker", icon: "🥐", tunicColor: 0xe8dfd1, hatColor: 0xfaf7f0 },
+  sawyer: { label: "Sawyer", icon: "🪚", tunicColor: 0x8c5a32, hatColor: 0x4d6b3c },
+  miner: { label: "Miner", icon: "⛏️", tunicColor: 0x5c6778, hatColor: 0xd4a438 },
+};
+
+export const SEASON_META: Record<Season, { label: string; icon: string }> = {
+  spring: { label: "Spring", icon: "🌸" },
+  summer: { label: "Summer", icon: "☀️" },
+  autumn: { label: "Autumn", icon: "🍂" },
+  winter: { label: "Winter", icon: "❄️" },
 };
 
 export const TRAIT_META: Record<VillagerTraitId, VillagerTraitDefinition> = {
