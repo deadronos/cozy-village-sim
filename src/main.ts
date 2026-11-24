@@ -3,6 +3,7 @@ import { AssetLibrary } from "./game/assets.ts";
 import { CozyAudio } from "./game/audio.ts";
 import { createRendererContext } from "./game/renderer.ts";
 import { VillageSimulation } from "./game/simulation.ts";
+import { decodeShareHash, loadAutosave, saveAutosave } from "./game/storage.ts";
 import { TILE_SIZE, type BuildingKind, type ToolMode } from "./game/types.ts";
 import { CozyHud } from "./game/ui.ts";
 import { IslandWorld } from "./game/world.ts";
@@ -90,8 +91,10 @@ async function bootstrap(): Promise<void> {
       setGhostBuilding(tool.category === "build" ? tool.building : null);
     },
     onTimeOfDayChange(tod) {
-      ctx.setTimeOfDay(tod);
-      sim.timeOfDay = tod;
+      sim.setTimeOfDay(tod);
+    },
+    onSeasonChange(season) {
+      sim.setSeason(season);
     },
     onFocusPosition(x, z) {
       const offset = ctx.camera.position.clone().sub(ctx.controls.target);
@@ -100,14 +103,37 @@ async function bootstrap(): Promise<void> {
     },
   });
 
-  sim.onStateChanged = () => hud.render();
+  sim.onAtmosphereChanged = (tod, season) => {
+    ctx.setAtmosphere(tod, season);
+  };
 
-  // Periodic subtle HUD refresh so villager status text stays live
+  sim.onStateChanged = () => {
+    if (!hud.isModalOpen) hud.render();
+  };
+
+  // Restore shared village link (#village=...) or local autosave on startup
+  const shared = decodeShareHash(window.location.hash);
+  if (shared && shared.ok) {
+    sim.loadSaveData(shared.data);
+    window.history.replaceState(null, "", window.location.pathname);
+  } else {
+    const autosaved = loadAutosave();
+    if (autosaved) {
+      sim.loadSaveData(autosaved);
+    }
+  }
+  ctx.setAtmosphere(sim.timeOfDay, sim.season);
+  hud.render();
+
+  // Periodic subtle HUD refresh & localStorage auto-save
   let uiRefreshTimer = 0;
+  let autosaveTimer = 0;
 
   // Raycasting
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
+  const waterPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0.18);
+  const waterHit = new THREE.Vector3();
   let hoveredTile: { gx: number; gz: number } | null = null;
 
   const updatePointer = (ev: PointerEvent) => {
@@ -120,10 +146,15 @@ async function bootstrap(): Promise<void> {
     raycaster.setFromCamera(pointer, ctx.camera);
     const hits = raycaster.intersectObjects(world.groundPickables, false);
     const first = hits[0];
-    if (!first) return null;
-    const data = first.object.userData as { gx?: number; gz?: number };
-    if (typeof data.gx === "number" && typeof data.gz === "number") {
-      return { gx: data.gx, gz: data.gz };
+    if (first) {
+      const data = first.object.userData as { gx?: number; gz?: number };
+      if (typeof data.gx === "number" && typeof data.gz === "number") {
+        return { gx: data.gx, gz: data.gz };
+      }
+    }
+    // Fallback to water plane so players can place, inspect, or demolish Wooden Bridges over water
+    if (raycaster.ray.intersectPlane(waterPlane, waterHit)) {
+      return world.worldToGrid(waterHit.x, waterHit.z);
     }
     return null;
   };
@@ -138,7 +169,8 @@ async function bootstrap(): Promise<void> {
     const tile = world.getTile(hoveredTile.gx, hoveredTile.gz);
     if (!tile) return;
     const pos = world.gridToWorld(hoveredTile.gx, hoveredTile.gz);
-    hoverRing.position.set(pos.x, tile.elevation + 0.06, pos.z);
+    const hoverY = tile.terrain === "water" ? -0.12 : tile.elevation + 0.06;
+    hoverRing.position.set(pos.x, hoverY, pos.z);
     hoverRing.visible = true;
 
     const ringMat = hoverRing.material as THREE.MeshBasicMaterial;
@@ -148,7 +180,8 @@ async function bootstrap(): Promise<void> {
         ghostKind === "fishing_dock"
           ? world.getWaterFacingRotation(hoveredTile.gx, hoveredTile.gz)
           : buildRotation;
-      ghostMesh.position.set(pos.x, tile.elevation, pos.z);
+      const ghostY = ghostKind === "bridge" ? -0.2 : tile.elevation;
+      ghostMesh.position.set(pos.x, ghostY, pos.z);
       ghostMesh.rotation.y = rot * (Math.PI / 2);
       ghostMesh.visible = true;
       tintGhost(check.ok);
@@ -237,6 +270,10 @@ async function bootstrap(): Promise<void> {
       buildRotation = (buildRotation + 1) % 4;
       updateHoverVisuals();
     } else if (ev.code === "Escape") {
+      if (hud.isModalOpen) {
+        hud.closeModal();
+        return;
+      }
       hud.setTool({ category: "select" });
       sim.selectedBuildingId = null;
       sim.selectedVillagerId = null;
@@ -266,9 +303,18 @@ async function bootstrap(): Promise<void> {
     uiRefreshTimer += dt;
     if (uiRefreshTimer >= 1.2) {
       uiRefreshTimer = 0;
-      if (sim.selectedBuildingId || sim.selectedVillagerId || sim.villagers.length > 0) {
+      if (
+        !hud.isModalOpen &&
+        (sim.selectedBuildingId || sim.selectedVillagerId || sim.villagers.length > 0)
+      ) {
         hud.render();
       }
+    }
+
+    autosaveTimer += dt;
+    if (autosaveTimer >= 20) {
+      autosaveTimer = 0;
+      saveAutosave(sim.exportSaveData());
     }
 
     ctx.renderer.render(ctx.scene, ctx.camera);

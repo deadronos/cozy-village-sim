@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import type { TimeOfDay } from "./types.ts";
+import type { Season, TimeOfDay } from "./types.ts";
 
 export interface RendererContext {
   renderer:
@@ -17,7 +17,7 @@ export interface RendererContext {
   controls: OrbitControls;
   sunLight: THREE.DirectionalLight;
   hemiLight: THREE.HemisphereLight;
-  setTimeOfDay(tod: TimeOfDay): void;
+  setAtmosphere(tod: TimeOfDay, season: Season): void;
   updateKeyboardPan(dt: number, keys: Set<string>): void;
 }
 
@@ -144,15 +144,34 @@ export async function createRendererContext(canvas: HTMLCanvasElement): Promise<
   sunLight.shadow.bias = -0.0008;
   scene.add(sunLight);
 
-  const setTimeOfDay = (tod: TimeOfDay) => {
+  const setAtmosphere = (tod: TimeOfDay, season: Season) => {
     const p = SKY_PRESETS[tod];
-    scene.background = new THREE.Color(p.bg);
-    scene.fog = new THREE.Fog(p.fog, 42, 95);
-    sunLight.color.setHex(p.sunColor);
-    sunLight.intensity = p.sunIntensity;
+    const bg = new THREE.Color(p.bg);
+    const fog = new THREE.Color(p.fog);
+    const sunColor = new THREE.Color(p.sunColor);
+
+    // Subtle seasonal mood tinting
+    if (season === "spring" && tod !== "dusk") {
+      bg.lerp(new THREE.Color(0xcdebf8), 0.25);
+      fog.lerp(new THREE.Color(0xdaf0fa), 0.25);
+    } else if (season === "autumn" && tod !== "dusk") {
+      bg.lerp(new THREE.Color(0xf0cba0), 0.28);
+      fog.lerp(new THREE.Color(0xf0d2ae), 0.28);
+      sunColor.lerp(new THREE.Color(0xffc078), 0.25);
+    } else if (season === "winter") {
+      bg.lerp(new THREE.Color(tod === "dusk" ? 0x1c2844 : 0xd0e2f0), 0.45);
+      fog.lerp(new THREE.Color(tod === "dusk" ? 0x243252 : 0xdbe9f4), 0.45);
+      sunColor.lerp(new THREE.Color(0xe6f2ff), 0.3);
+    }
+
+    scene.background = bg;
+    scene.fog = new THREE.Fog(fog.getHex(), 42, 95);
+    sunLight.color.copy(sunColor);
+    sunLight.intensity =
+      season === "winter" && tod !== "dusk" ? p.sunIntensity * 0.9 : p.sunIntensity;
     sunLight.position.set(...p.sunPos);
     hemiLight.color.setHex(p.hemiSky);
-    hemiLight.groundColor.setHex(p.hemiGround);
+    hemiLight.groundColor.setHex(season === "winter" && tod !== "dusk" ? 0xaabcc9 : p.hemiGround);
     hemiLight.intensity = p.hemiIntensity;
   };
 
@@ -205,7 +224,7 @@ export async function createRendererContext(canvas: HTMLCanvasElement): Promise<
     controls,
     sunLight,
     hemiLight,
-    setTimeOfDay,
+    setAtmosphere,
     updateKeyboardPan,
   };
 }

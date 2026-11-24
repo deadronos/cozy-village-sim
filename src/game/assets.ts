@@ -28,6 +28,16 @@ const ASSET_PATHS: Record<AssetKey, string> = {
   windmill: "/assets/models/windmill_base.glb",
   windmill_base: "/assets/models/windmill_base.glb",
   windmill_blades: "/assets/models/windmill_blades.glb",
+  bakery: "/assets/models/bakery.glb",
+  sawmill: "/assets/models/sawmill.glb",
+  quarry: "/assets/models/quarry.glb",
+  tavern: "/assets/models/tavern.glb",
+  bridge: "/assets/models/bridge.glb",
+  wood_fence: "/assets/kit/wood_fence.glb",
+  stone_wall: "/assets/models/stone_wall.glb",
+  lantern: "/assets/models/lantern.glb",
+  flower_box: "/assets/models/flower_box.glb",
+  bench: "/assets/models/bench.glb",
   scaffold: "/assets/models/scaffold.glb",
   villager: "/assets/models/villager.glb",
   tree_pine: "/assets/kit/tree_pine.glb",
@@ -104,7 +114,16 @@ export class AssetLibrary {
       crown.position.set(0, 0.71, 0);
       crown.castShadow = true;
       group.add(brim, crown);
-    } else if (job === "builder") {
+    } else if (job === "baker") {
+      // Puffy white chef toque
+      const band = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.15, 0.1, 8), hatMat);
+      band.position.set(0, 0.66, 0);
+      band.castShadow = true;
+      const puff = new THREE.Mesh(new THREE.SphereGeometry(0.15, 8, 6), hatMat);
+      puff.position.set(0, 0.77, 0);
+      puff.castShadow = true;
+      group.add(band, puff);
+    } else if (job === "builder" || job === "miner") {
       // Rounded hard-cap
       const cap = new THREE.Mesh(
         new THREE.SphereGeometry(0.165, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.55),
@@ -136,18 +155,28 @@ export class AssetLibrary {
       flatShading: true,
     });
 
-    if (job === "lumberjack") {
+    if (job === "lumberjack" || job === "sawyer") {
       const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.42, 5), woodMat);
       handle.position.y = 0.12;
       const blade = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.1, 0.04), ironMat);
       blade.position.set(0.05, 0.28, 0);
       toolPivot.add(handle, blade);
-    } else if (job === "builder" || job === "smith") {
+    } else if (job === "builder" || job === "smith" || job === "miner") {
       const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.34, 5), woodMat);
       handle.position.y = 0.1;
-      const head = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.08, 0.08), ironMat);
+      const head = new THREE.Mesh(
+        new THREE.BoxGeometry(job === "miner" ? 0.22 : 0.15, 0.07, 0.07),
+        ironMat,
+      );
       head.position.set(0, 0.26, 0);
       toolPivot.add(handle, head);
+    } else if (job === "baker") {
+      // Wooden baker's peel paddle
+      const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.44, 5), woodMat);
+      handle.position.y = 0.14;
+      const paddle = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.025), woodMat);
+      paddle.position.set(0, 0.36, 0);
+      toolPivot.add(handle, paddle);
     } else if (job === "fisherman") {
       const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.018, 0.75, 5), woodMat);
       rod.position.set(0, 0.28, 0.22);
