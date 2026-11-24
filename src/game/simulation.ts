@@ -5,6 +5,7 @@ import { findGridPath, gridPathToWorldWaypoints, type PathOptions } from "./path
 import { SAVE_SCHEMA_VERSION, type VillageSaveData } from "./storage.ts";
 import {
   BUILDING_DEFS,
+  DEFAULT_ISLAND_CONFIG,
   JOB_META,
   MAP_SIZE,
   TRAIT_META,
@@ -13,6 +14,7 @@ import {
   type EmoteBubble,
   type FloatingPopup,
   type GridTile,
+  type IslandConfig,
   type ResourceBag,
   type Season,
   type TimeOfDay,
@@ -134,30 +136,86 @@ export class VillageSimulation {
     this.setupStarterVillage();
   }
 
+  public getIslandConfig(): IslandConfig {
+    return this.world.config;
+  }
+
   private setupStarterVillage(): void {
-    const cx = Math.floor((MAP_SIZE - 1) / 2);
-    const cz = Math.floor((MAP_SIZE - 1) / 2);
+    const { townCenter, starterBridges, starterFarms } = this.world.layout;
+    const cx = townCenter.gx;
+    const cz = townCenter.gz;
+    const centerElev = this.world.getTile(cx, cz)?.elevation ?? 0;
 
     // Paint cozy cobblestone square around Town Hall
     for (let dz = -1; dz <= 1; dz++) {
       for (let dx = -1; dx <= 1; dx++) {
         if (dx === 0 && dz === 0) continue;
-        this.world.setTileTerrain(cx + dx, cz + dz, "path");
+        const t = this.world.getTile(cx + dx, cz + dz);
+        if (
+          t &&
+          t.terrain !== "water" &&
+          t.terrain !== "sand" &&
+          !t.hasSteps &&
+          Math.abs(t.elevation - centerElev) <= 0.05
+        ) {
+          this.world.setTileTerrain(cx + dx, cz + dz, "path");
+        }
       }
     }
 
     // Place starter Town Hall (already constructed)
     this.spawnBuilding("town_hall", cx, cz, 0, true);
 
-    // Place a couple of starter farmfields nearby so players see wheat right away
-    this.world.setTileTerrain(cx - 2, cz + 1, "farm");
-    this.world.setTileTerrain(cx - 2, cz + 2, "farm");
-    this.world.setTileTerrain(cx - 3, cz + 1, "farm");
-    const t = this.world.getTile(cx - 2, cz + 1);
-    if (t) {
-      t.cropStage = 0.85;
-      this.world.updateCropVisual(t);
+    // Place starter wooden bridges for Archipelago and River Valley layouts
+    for (const br of starterBridges) {
+      this.spawnBuilding("bridge", br.gx, br.gz, br.rotation, true);
     }
+
+    // Place starter farmfields nearby so players see wheat right away
+    starterFarms.forEach((f, idx) => {
+      this.world.setTileTerrain(f.gx, f.gz, "farm");
+      if (idx === 0) {
+        const t = this.world.getTile(f.gx, f.gz);
+        if (t) {
+          t.cropStage = 0.85;
+          this.world.updateCropVisual(t);
+        }
+      }
+    });
+
+    this.syncWaterPilings();
+  }
+
+  private syncWaterPilings(): void {
+    const pilings: Array<{ x: number; z: number }> = [];
+    for (const b of this.buildings) {
+      if (b.kind !== "fishing_dock" && b.kind !== "bridge") continue;
+      const center = this.world.gridToWorld(b.gx, b.gz);
+      const angle = b.rotation * (Math.PI / 2);
+      const cosA = Math.cos(angle);
+      const sinA = Math.sin(angle);
+      const offsets =
+        b.kind === "fishing_dock"
+          ? ([
+              [-0.65, -0.55],
+              [0.65, -0.55],
+              [-0.65, 0.55],
+              [0.65, 0.55],
+            ] as const)
+          : ([
+              [-0.82, -0.54],
+              [0.82, -0.54],
+              [-0.82, 0.54],
+              [0.82, 0.54],
+            ] as const);
+      for (const [lx, lz] of offsets) {
+        pilings.push({
+          x: center.x + lx * cosA + lz * sinA,
+          z: center.z - lx * sinA + lz * cosA,
+        });
+      }
+    }
+    this.world.updateWaterField(pilings);
   }
 
   public getMaxPopulation(): number {
@@ -229,6 +287,7 @@ export class VillageSimulation {
     const tile = this.world.getTile(gx, gz);
     if (!tile) return { ok: false, reason: "Out of bounds" };
     if (tile.buildingId) return { ok: false, reason: "Tile occupied" };
+    if (tile.hasSteps) return { ok: false, reason: "Cannot build on stone steps" };
 
     const def = BUILDING_DEFS[kind];
     if (def.unique && this.buildings.some((b) => b.kind === kind)) {
@@ -276,6 +335,9 @@ export class VillageSimulation {
 
     const finalRot = def.shoreOnly ? this.world.getWaterFacingRotation(gx, gz) : rotation;
     this.spawnBuilding(kind, gx, gz, finalRot, def.buildTime === 0);
+    if (kind === "bridge" || kind === "fishing_dock") {
+      this.syncWaterPilings();
+    }
     this.navVersion++;
     this.audio.playPlace();
     this.onStateChanged?.();
@@ -462,6 +524,9 @@ export class VillageSimulation {
       const tile = this.world.getTile(b.gx, b.gz);
       if (tile) tile.hasBridge = true;
     }
+    if (b.kind === "bridge" || b.kind === "fishing_dock") {
+      this.syncWaterPilings();
+    }
     this.applyAtmosphereToBuilding(b);
 
     this.spawnParticles(pos.x, pos.y + 0.7, pos.z, 0xf6d56a, 10);
@@ -553,6 +618,9 @@ export class VillageSimulation {
       const def = BUILDING_DEFS[b.kind];
       this.resources.wood += Math.floor((def.cost.wood ?? 0) * 0.5);
       this.resources.stone += Math.floor((def.cost.stone ?? 0) * 0.5);
+      if (b.kind === "bridge" || b.kind === "fishing_dock") {
+        this.syncWaterPilings();
+      }
       this.navVersion++;
       this.audio.playDemolish();
       this.onStateChanged?.();
@@ -566,7 +634,10 @@ export class VillageSimulation {
       return true;
     }
 
-    if (tile.terrain === "path" || tile.terrain === "farm" || tile.terrain === "meadow") {
+    if (
+      !tile.hasSteps &&
+      (tile.terrain === "path" || tile.terrain === "farm" || tile.terrain === "meadow")
+    ) {
       this.world.setTileTerrain(gx, gz, "grass");
       this.navVersion++;
       this.audio.playDemolish();
@@ -578,7 +649,13 @@ export class VillageSimulation {
 
   public paintAt(gx: number, gz: number, paint: "path" | "farm" | "meadow" | "tree"): boolean {
     const tile = this.world.getTile(gx, gz);
-    if (!tile || tile.terrain === "water" || tile.terrain === "sand" || tile.buildingId) {
+    if (
+      !tile ||
+      tile.terrain === "water" ||
+      tile.terrain === "sand" ||
+      tile.buildingId ||
+      tile.hasSteps
+    ) {
       return false;
     }
 
@@ -689,9 +766,10 @@ export class VillageSimulation {
     b.workerId = id;
     this.villagers.push(villager);
     const homePos = this.world.gridToWorld(b.gx, b.gz);
+    const homeElev = this.world.getTile(b.gx, b.gz)?.elevation ?? 0;
     this.spawnPopup(
       homePos.x,
-      1.6,
+      homeElev + 1.6,
       homePos.z,
       `${JOB_META[def.job].icon} ${name} (${traitMeta.icon} ${traitMeta.label}) joined!`,
       "#b8f2ff",
@@ -707,6 +785,8 @@ export class VillageSimulation {
   }
 
   private findWalkableAdjacentTile(gx: number, gz: number): { gx: number; gz: number } | null {
+    const homeTile = this.world.getTile(gx, gz);
+    const homeElev = homeTile?.elevation ?? 0;
     const dirs: readonly [number, number][] = [
       [0, 1],
       [1, 0],
@@ -721,6 +801,7 @@ export class VillageSimulation {
     for (const [dx, dz] of dirs) {
       const t = this.world.getTile(gx + dx, gz + dz);
       if (!t || t.terrain === "water" || t.buildingId !== null) continue;
+      if (Math.abs(t.elevation - homeElev) > 0.25 && !t.hasSteps) continue;
       if (t.terrain === "path") return { gx: t.gx, gz: t.gz };
       if (!fallback) fallback = { gx: t.gx, gz: t.gz };
     }
@@ -1041,7 +1122,14 @@ export class VillageSimulation {
       // Faster walking on cobblestone paths, bridges, Bread morale & Fast Walker trait!
       const currGrid = this.world.worldToGrid(v.x, v.z);
       const currTile = currGrid ? this.world.getTile(currGrid.gx, currGrid.gz) : null;
-      const baseElevation = currTile?.hasBridge ? 0.14 : (currTile?.elevation ?? 0);
+      const targetBaseElev = currTile?.hasBridge
+        ? 0.14
+        : currTile?.hasSteps
+          ? currTile.elevation + 0.22
+          : (currTile?.elevation ?? 0);
+      const prevBaseY = (v.mesh.userData["baseY"] as number | undefined) ?? targetBaseElev;
+      const baseElevation = THREE.MathUtils.lerp(prevBaseY, targetBaseElev, Math.min(1, dt * 14));
+      v.mesh.userData["baseY"] = baseElevation;
       const onRoad = currTile?.terrain === "path" || Boolean(currTile?.hasBridge);
       const pathBoost = onRoad ? 1.45 : 1.0;
       const traitWalkBoost = v.trait === "fast_walker" ? 1.25 : 1.0;
@@ -1122,9 +1210,13 @@ export class VillageSimulation {
     if (v.state === "working") {
       // Cute tool-swing animation while working
       const currGrid = this.world.worldToGrid(v.x, v.z);
-      const baseElevation = currGrid
-        ? (this.world.getTile(currGrid.gx, currGrid.gz)?.elevation ?? 0)
-        : 0;
+      const currTile = currGrid ? this.world.getTile(currGrid.gx, currGrid.gz) : null;
+      const baseElevation = currTile?.hasBridge
+        ? 0.14
+        : currTile?.hasSteps
+          ? currTile.elevation + 0.22
+          : (currTile?.elevation ?? 0);
+      v.mesh.userData["baseY"] = baseElevation;
       v.mesh.position.set(v.x, baseElevation + Math.abs(Math.sin(elapsed * 8)) * 0.05, v.z);
       if (v.toolMesh) {
         v.toolMesh.rotation.x = Math.sin(elapsed * 12) * 0.65;
@@ -1143,7 +1235,13 @@ export class VillageSimulation {
           Math.max(def.buildTime, 1);
         v.statusText = `Building ${def.name} (${Math.min(99, Math.floor(site.buildProgress * 100))}%)`;
         if (Math.random() < dt * 4) {
-          this.spawnParticles(site.mesh.position.x, 0.7, site.mesh.position.z, 0xdcb47a, 2);
+          this.spawnParticles(
+            site.mesh.position.x,
+            site.mesh.position.y + 0.7,
+            site.mesh.position.z,
+            0xdcb47a,
+            2,
+          );
         }
         if (site.buildProgress >= 1) {
           this.completeBuilding(site);
@@ -1163,7 +1261,7 @@ export class VillageSimulation {
 
       v.workTimer -= dt;
       if (v.job === "smith" && Math.random() < dt * 5) {
-        this.spawnParticles(v.x, 0.6, v.z, 0xff8c2b, 2);
+        this.spawnParticles(v.x, baseElevation + 0.6, v.z, 0xff8c2b, 2);
       }
       if (v.workTimer <= 0) {
         if (v.toolMesh) v.toolMesh.rotation.x = 0;
@@ -1350,12 +1448,14 @@ export class VillageSimulation {
   }
 
   private pickPatrolTile(homeGx: number, homeGz: number): { gx: number; gz: number } {
+    const homeElev = this.world.getTile(homeGx, homeGz)?.elevation ?? 0;
     const candidates: { gx: number; gz: number; isPath: boolean }[] = [];
     for (let dz = -3; dz <= 3; dz++) {
       for (let dx = -3; dx <= 3; dx++) {
         if (dx === 0 && dz === 0) continue;
         const t = this.world.getTile(homeGx + dx, homeGz + dz);
         if (!t || t.terrain === "water" || t.buildingId !== null) continue;
+        if (Math.abs(t.elevation - homeElev) > 0.25 && !t.hasSteps) continue;
         candidates.push({ gx: t.gx, gz: t.gz, isPath: t.terrain === "path" });
       }
     }
@@ -1384,6 +1484,7 @@ export class VillageSimulation {
 
   private finishWorkAction(v: VillagerInstance, home: BuildingInstance): void {
     const bonus = home.level;
+    const vElev = v.mesh.position.y;
 
     if (v.job === "lumberjack" && v.targetTile) {
       const tile = this.world.getTile(v.targetTile.gx, v.targetTile.gz);
@@ -1391,7 +1492,7 @@ export class VillageSimulation {
         this.world.setTileProp(tile.gx, tile.gz, "stump");
         tile.regrowTimer = 0;
         this.navVersion++;
-        this.spawnParticles(v.x, 0.7, v.z, 0x8f6138, 6);
+        this.spawnParticles(v.x, vElev + 0.7, v.z, 0x8f6138, 6);
         v.carrying = "wood";
         v.carryingAmount = 2 + bonus + (v.trait === "lumber_pro" ? 1 : 0);
       }
@@ -1416,7 +1517,7 @@ export class VillageSimulation {
           const greenThumbBonus = v.trait === "green_thumb" ? 1 : 0;
           v.carrying = "food";
           v.carryingAmount = (2 + bonus + greenThumbBonus) * (hasWindmill ? 2 : 1);
-          this.spawnParticles(v.x, 0.5, v.z, 0xf2cf52, 6);
+          this.spawnParticles(v.x, vElev + 0.5, v.z, 0xf2cf52, 6);
           this.setVillagerDestination(v, home.gx, home.gz, { goalAdjacent: true });
           v.state = "returning";
           v.statusText = "Delivering golden wheat";
@@ -1437,9 +1538,9 @@ export class VillageSimulation {
         const luckyWood = Math.random() < 0.5;
         if (luckyWood) this.resources.wood += 1;
         else this.resources.stone += 1;
-        this.spawnPopup(v.x, 1.5, v.z, luckyWood ? "🍀 +1 🪵" : "🍀 +1 🪨", "#a8f0c6");
+        this.spawnPopup(v.x, vElev + 1.5, v.z, luckyWood ? "🍀 +1 🪵" : "🍀 +1 🪨", "#a8f0c6");
       }
-      this.spawnParticles(v.x, 0.4, v.z, 0x7fd4ff, 6);
+      this.spawnParticles(v.x, vElev + 0.4, v.z, 0x7fd4ff, 6);
       this.setVillagerDestination(
         v,
         home.gx,
@@ -1478,7 +1579,7 @@ export class VillageSimulation {
         v.carrying = "bread";
         v.carryingAmount = 1;
       }
-      this.spawnParticles(v.x, 0.7, v.z, 0xf7d288, 5);
+      this.spawnParticles(v.x, vElev + 0.7, v.z, 0xf7d288, 5);
       this.setVillagerDestination(v, home.gx, home.gz, { goalAdjacent: true });
       v.state = "returning";
       v.statusText = "Fresh bread from the oven!";
@@ -1494,7 +1595,7 @@ export class VillageSimulation {
         v.carrying = "planks";
         v.carryingAmount = 1;
       }
-      this.spawnParticles(v.x, 0.6, v.z, 0xd8a86a, 5);
+      this.spawnParticles(v.x, vElev + 0.6, v.z, 0xd8a86a, 5);
       this.setVillagerDestination(v, home.gx, home.gz, { goalAdjacent: true });
       v.state = "returning";
       v.statusText = "Stacking finished planks";
@@ -1504,7 +1605,7 @@ export class VillageSimulation {
     if (v.job === "miner") {
       v.carrying = "stone";
       v.carryingAmount = 3 + bonus;
-      this.spawnParticles(v.x, 0.6, v.z, 0x9aa0a8, 6);
+      this.spawnParticles(v.x, vElev + 0.6, v.z, 0x9aa0a8, 6);
       this.setVillagerDestination(v, home.gx, home.gz, { goalAdjacent: true });
       v.state = "returning";
       v.statusText = "Hauling quarried stone";
@@ -1708,7 +1809,7 @@ export class VillageSimulation {
       for (let gx = 0; gx < MAP_SIZE; gx++) {
         const t = this.world.getTile(gx, gz);
         if (!t || t.terrain === "water" || t.terrain === "sand") continue;
-        if (t.terrain !== "grass") {
+        if (t.terrain !== "grass" && !t.hasSteps) {
           terrainOverrides.push({
             gx,
             gz,
@@ -1746,6 +1847,9 @@ export class VillageSimulation {
     return {
       schemaVersion: SAVE_SCHEMA_VERSION,
       savedAt: new Date().toISOString(),
+      seed: this.world.config.seed,
+      archetype: this.world.config.archetype,
+      biome: this.world.config.biome,
       timeOfDay: this.timeOfDay,
       season: this.season,
       autoSeason: this.autoSeason,
@@ -1778,9 +1882,9 @@ export class VillageSimulation {
     this.selectedVillagerId = null;
   }
 
-  public resetToStarterVillage(): void {
+  public startNewIsland(config: IslandConfig): void {
     this.clearAllEntities();
-    this.world.resetIsland();
+    this.world.generateIsland(config);
     this.resources = { wood: 38, stone: 16, food: 20, tools: 1, planks: 2, bread: 0 };
     this.timeOfDay = "morning";
     this.season = "summer";
@@ -1792,9 +1896,17 @@ export class VillageSimulation {
     this.onStateChanged?.();
   }
 
+  public resetToStarterVillage(): void {
+    this.startNewIsland(this.world.config);
+  }
+
   public loadSaveData(data: VillageSaveData): void {
     this.clearAllEntities();
-    this.world.resetIsland();
+    this.world.generateIsland({
+      seed: data.seed ?? DEFAULT_ISLAND_CONFIG.seed,
+      archetype: data.archetype ?? DEFAULT_ISLAND_CONFIG.archetype,
+      biome: data.biome ?? DEFAULT_ISLAND_CONFIG.biome,
+    });
 
     this.resources = { ...data.resources };
     this.timeOfDay = data.timeOfDay;
@@ -1806,7 +1918,7 @@ export class VillageSimulation {
     for (let gz = 0; gz < MAP_SIZE; gz++) {
       for (let gx = 0; gx < MAP_SIZE; gx++) {
         const t = this.world.getTile(gx, gz);
-        if (!t || t.terrain === "water" || t.terrain === "sand") continue;
+        if (!t || t.terrain === "water" || t.terrain === "sand" || t.hasSteps) continue;
         if (t.terrain !== "grass") {
           this.world.setTileTerrain(gx, gz, "grass");
         }
@@ -1818,7 +1930,7 @@ export class VillageSimulation {
 
     for (const ov of data.terrainOverrides) {
       const t = this.world.getTile(ov.gx, ov.gz);
-      if (!t || t.terrain === "water" || t.terrain === "sand") continue;
+      if (!t || t.terrain === "water" || t.terrain === "sand" || t.hasSteps) continue;
       this.world.setTileTerrain(ov.gx, ov.gz, ov.terrain);
       if (ov.terrain === "farm" && typeof ov.cropStage === "number") {
         t.cropStage = ov.cropStage;
@@ -1892,6 +2004,7 @@ export class VillageSimulation {
       }
     }
 
+    this.syncWaterPilings();
     this.navVersion++;
     this.onAtmosphereChanged?.(this.timeOfDay, this.season);
     this.onStateChanged?.();

@@ -1,9 +1,10 @@
 import * as THREE from "three";
 import { AssetLibrary } from "./game/assets.ts";
 import { CozyAudio } from "./game/audio.ts";
+import { CloudSystem } from "./game/clouds.ts";
 import { createRendererContext } from "./game/renderer.ts";
 import { VillageSimulation } from "./game/simulation.ts";
-import { decodeShareHash, loadAutosave, saveAutosave } from "./game/storage.ts";
+import { decodeSeedHash, decodeShareHash, loadAutosave, saveAutosave } from "./game/storage.ts";
 import { TILE_SIZE, type BuildingKind, type ToolMode } from "./game/types.ts";
 import { CozyHud } from "./game/ui.ts";
 import { IslandWorld } from "./game/world.ts";
@@ -21,7 +22,8 @@ async function bootstrap(): Promise<void> {
   await assets.loadAll();
 
   const audio = new CozyAudio();
-  const world = new IslandWorld(ctx.scene, assets);
+  const world = new IslandWorld(ctx.scene, assets, ctx.supportsTSL);
+  const clouds = new CloudSystem(ctx.scene);
   const sim = new VillageSimulation(ctx.scene, world, assets, audio, floatingLayer);
 
   let activeTool: ToolMode = { category: "select" };
@@ -29,6 +31,19 @@ async function bootstrap(): Promise<void> {
   let isPointerDown = false;
   let lastPaintedKey = "";
   const pressedKeys = new Set<string>();
+
+  const focusPosition = (x: number, y: number, z: number) => {
+    const offset = ctx.camera.position.clone().sub(ctx.controls.target);
+    ctx.controls.target.set(x, y, z);
+    ctx.camera.position.copy(ctx.controls.target).add(offset);
+  };
+
+  const focusTownCenter = () => {
+    const tc = world.layout.townCenter;
+    const pos = world.gridToWorld(tc.gx, tc.gz);
+    const elev = world.getTile(tc.gx, tc.gz)?.elevation ?? 0;
+    focusPosition(pos.x, elev, pos.z);
+  };
 
   // Hover tile outline & translucent 3D placement ghost
   const hoverRing = new THREE.Mesh(
@@ -97,24 +112,33 @@ async function bootstrap(): Promise<void> {
       sim.setSeason(season);
     },
     onFocusPosition(x, z) {
-      const offset = ctx.camera.position.clone().sub(ctx.controls.target);
-      ctx.controls.target.set(x, 0, z);
-      ctx.camera.position.copy(ctx.controls.target).add(offset);
+      focusPosition(x, 0, z);
+    },
+    onNewIsland(config) {
+      sim.startNewIsland(config);
+      saveAutosave(sim.exportSaveData());
+      focusTownCenter();
     },
   });
 
   sim.onAtmosphereChanged = (tod, season) => {
     ctx.setAtmosphere(tod, season);
+    clouds.setAtmosphere(tod, season);
   };
 
   sim.onStateChanged = () => {
     if (!hud.isModalOpen) hud.render();
   };
 
-  // Restore shared village link (#village=...) or local autosave on startup
+  // Restore shared village (#village=...), shared map seed (#seed=...), or local autosave on startup
   const shared = decodeShareHash(window.location.hash);
+  const sharedSeed = decodeSeedHash(window.location.hash);
   if (shared && shared.ok) {
     sim.loadSaveData(shared.data);
+    window.history.replaceState(null, "", window.location.pathname);
+  } else if (sharedSeed) {
+    sim.startNewIsland(sharedSeed);
+    saveAutosave(sim.exportSaveData());
     window.history.replaceState(null, "", window.location.pathname);
   } else {
     const autosaved = loadAutosave();
@@ -123,6 +147,8 @@ async function bootstrap(): Promise<void> {
     }
   }
   ctx.setAtmosphere(sim.timeOfDay, sim.season);
+  clouds.setAtmosphere(sim.timeOfDay, sim.season);
+  focusTownCenter();
   hud.render();
 
   // Periodic subtle HUD refresh & localStorage auto-save
@@ -132,8 +158,6 @@ async function bootstrap(): Promise<void> {
   // Raycasting
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
-  const waterPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0.18);
-  const waterHit = new THREE.Vector3();
   let hoveredTile: { gx: number; gz: number } | null = null;
 
   const updatePointer = (ev: PointerEvent) => {
@@ -144,19 +168,7 @@ async function bootstrap(): Promise<void> {
 
   const raycastTile = (): { gx: number; gz: number } | null => {
     raycaster.setFromCamera(pointer, ctx.camera);
-    const hits = raycaster.intersectObjects(world.groundPickables, false);
-    const first = hits[0];
-    if (first) {
-      const data = first.object.userData as { gx?: number; gz?: number };
-      if (typeof data.gx === "number" && typeof data.gz === "number") {
-        return { gx: data.gx, gz: data.gz };
-      }
-    }
-    // Fallback to water plane so players can place, inspect, or demolish Wooden Bridges over water
-    if (raycaster.ray.intersectPlane(waterPlane, waterHit)) {
-      return world.worldToGrid(waterHit.x, waterHit.z);
-    }
-    return null;
+    return world.raycastGround(raycaster);
   };
 
   const updateHoverVisuals = () => {
@@ -169,7 +181,12 @@ async function bootstrap(): Promise<void> {
     const tile = world.getTile(hoveredTile.gx, hoveredTile.gz);
     if (!tile) return;
     const pos = world.gridToWorld(hoveredTile.gx, hoveredTile.gz);
-    const hoverY = tile.terrain === "water" ? -0.12 : tile.elevation + 0.06;
+    const hoverY =
+      tile.terrain === "water"
+        ? -0.12
+        : tile.hasSteps
+          ? tile.elevation + 0.28
+          : tile.elevation + 0.06;
     hoverRing.position.set(pos.x, hoverY, pos.z);
     hoverRing.visible = true;
 
@@ -265,11 +282,13 @@ async function bootstrap(): Promise<void> {
   });
 
   window.addEventListener("keydown", (ev) => {
-    pressedKeys.add(ev.code);
-    if (ev.code === "KeyR" && activeTool.category === "build") {
-      buildRotation = (buildRotation + 1) % 4;
-      updateHoverVisuals();
-    } else if (ev.code === "Escape") {
+    const target = ev.target as HTMLElement | null;
+    const isTyping =
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      Boolean(target?.isContentEditable);
+
+    if (ev.code === "Escape") {
       if (hud.isModalOpen) {
         hud.closeModal();
         return;
@@ -278,6 +297,15 @@ async function bootstrap(): Promise<void> {
       sim.selectedBuildingId = null;
       sim.selectedVillagerId = null;
       hud.render();
+      return;
+    }
+
+    if (isTyping) return;
+
+    pressedKeys.add(ev.code);
+    if (ev.code === "KeyR" && activeTool.category === "build") {
+      buildRotation = (buildRotation + 1) % 4;
+      updateHoverVisuals();
     }
   });
 
@@ -297,7 +325,8 @@ async function bootstrap(): Promise<void> {
 
     ctx.updateKeyboardPan(dt, pressedKeys);
     ctx.controls.update();
-    world.updateWater(elapsed);
+    world.updateVisuals(elapsed);
+    clouds.update(dt, elapsed, ctx.camera);
     sim.update(dt, elapsed, ctx.camera);
 
     uiRefreshTimer += dt;
@@ -307,7 +336,7 @@ async function bootstrap(): Promise<void> {
         !hud.isModalOpen &&
         (sim.selectedBuildingId || sim.selectedVillagerId || sim.villagers.length > 0)
       ) {
-        hud.render();
+        hud.refreshDynamicText();
       }
     }
 
