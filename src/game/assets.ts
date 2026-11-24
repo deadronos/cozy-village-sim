@@ -17,36 +17,36 @@ export type AssetKey =
   | "path_stones";
 
 const ASSET_PATHS: Record<AssetKey, string> = {
-  town_hall: "/assets/models/town_hall.glb",
-  cottage: "/assets/models/cottage.glb",
-  lumber_hut: "/assets/models/lumber_hut.glb",
-  farmhouse: "/assets/models/farmhouse.glb",
-  fishing_dock: "/assets/models/fishing_dock.glb",
-  smithy: "/assets/models/smithy.glb",
-  builder_yard: "/assets/models/builder_yard.glb",
-  well: "/assets/models/well.glb",
-  windmill: "/assets/models/windmill_base.glb",
-  windmill_base: "/assets/models/windmill_base.glb",
-  windmill_blades: "/assets/models/windmill_blades.glb",
-  bakery: "/assets/models/bakery.glb",
-  sawmill: "/assets/models/sawmill.glb",
-  quarry: "/assets/models/quarry.glb",
-  tavern: "/assets/models/tavern.glb",
-  bridge: "/assets/models/bridge.glb",
-  wood_fence: "/assets/kit/wood_fence.glb",
-  stone_wall: "/assets/models/stone_wall.glb",
-  lantern: "/assets/models/lantern.glb",
-  flower_box: "/assets/models/flower_box.glb",
-  bench: "/assets/models/bench.glb",
-  scaffold: "/assets/models/scaffold.glb",
-  villager: "/assets/models/villager.glb",
-  tree_pine: "/assets/kit/tree_pine.glb",
-  tree_oak: "/assets/kit/tree_oak.glb",
-  rock_cluster: "/assets/kit/rock_cluster.glb",
-  stump: "/assets/kit/stump.glb",
-  grass_patch: "/assets/kit/grass_patch.glb",
-  wheat_patch: "/assets/kit/wheat_patch.glb",
-  path_stones: "/assets/kit/path_stones.glb",
+  town_hall: "assets/models/town_hall.glb",
+  cottage: "assets/models/cottage.glb",
+  lumber_hut: "assets/models/lumber_hut.glb",
+  farmhouse: "assets/models/farmhouse.glb",
+  fishing_dock: "assets/models/fishing_dock.glb",
+  smithy: "assets/models/smithy.glb",
+  builder_yard: "assets/models/builder_yard.glb",
+  well: "assets/models/well.glb",
+  windmill: "assets/models/windmill_base.glb",
+  windmill_base: "assets/models/windmill_base.glb",
+  windmill_blades: "assets/models/windmill_blades.glb",
+  bakery: "assets/models/bakery.glb",
+  sawmill: "assets/models/sawmill.glb",
+  quarry: "assets/models/quarry.glb",
+  tavern: "assets/models/tavern.glb",
+  bridge: "assets/models/bridge.glb",
+  wood_fence: "assets/kit/wood_fence.glb",
+  stone_wall: "assets/models/stone_wall.glb",
+  lantern: "assets/models/lantern.glb",
+  flower_box: "assets/models/flower_box.glb",
+  bench: "assets/models/bench.glb",
+  scaffold: "assets/models/scaffold.glb",
+  villager: "assets/models/villager.glb",
+  tree_pine: "assets/kit/tree_pine.glb",
+  tree_oak: "assets/kit/tree_oak.glb",
+  rock_cluster: "assets/kit/rock_cluster.glb",
+  stump: "assets/kit/stump.glb",
+  grass_patch: "assets/kit/grass_patch.glb",
+  wheat_patch: "assets/kit/wheat_patch.glb",
+  path_stones: "assets/kit/path_stones.glb",
 };
 
 export class AssetLibrary {
@@ -54,10 +54,11 @@ export class AssetLibrary {
   private loader = new GLTFLoader();
 
   public async loadAll(): Promise<void> {
+    const base = import.meta.env.BASE_URL;
     const entries = Object.entries(ASSET_PATHS) as [AssetKey, string][];
     await Promise.all(
       entries.map(async ([key, path]) => {
-        const gltf = await this.loader.loadAsync(path);
+        const gltf = await this.loader.loadAsync(`${base}${path}`);
         const root = gltf.scene;
         root.traverse((child) => {
           if (child instanceof THREE.Mesh) {
